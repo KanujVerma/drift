@@ -296,6 +296,7 @@ def _load(state: Path, regime: str) -> tuple[Study, Window]:
             limitations=tuple(row["limitations"]),
             document_name=_optional_text(row.get("document_name")),
             report_date=_optional_text(row.get("report_date")),
+            available_at=_optional_time(row.get("available_at")),
         )
         for row in cached["texts"]
     )
@@ -341,6 +342,9 @@ def _cache_study(state: Path, study: Study) -> None:
                 "evidence_id": item.evidence_id,
                 "kind": item.kind,
                 "limitations": list(item.limitations),
+                "available_at": (
+                    None if item.available_at is None else item.available_at.isoformat()
+                ),
                 "observed_at": item.observed_at.isoformat(),
                 "document_name": item.document_name,
                 "report_date": item.report_date,
@@ -487,6 +491,15 @@ def _optional_text(value: object) -> str | None:
     if isinstance(value, str) and value != "":
         return value
     return None
+
+
+def _optional_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or value == "":
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return None
+    return parsed
 
 
 def _attach_excerpts(

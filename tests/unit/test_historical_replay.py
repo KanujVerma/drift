@@ -28,12 +28,14 @@ from drift.historical.replay import (
     require_settlement,
     research_brief,
     shown_context,
+    texts_for_window,
 )
 from drift.historical.select import Close, Window, select_windows
 from drift.historical.sources import (
     PriceBar,
     TextInput,
     alpaca_access_gap,
+    entitled_feeds,
     filing_excerpt,
     parse_alpaca_bars,
     parse_alpaca_corporate_actions,
@@ -599,6 +601,22 @@ def test_alpaca_actions_and_news_keep_their_labels() -> None:
     assert rows[0].symbol == "AAPL"
     assert rows[0].source_label == "alpaca-news"
     assert rows[0].evidence_id == "alpaca:news:7:AAPL"
+    revised = parse_alpaca_news(
+        {
+            "news": [
+                {
+                    "id": 8,
+                    "headline": "Revised",
+                    "created_at": "2026-11-26T11:00:00Z",
+                    "updated_at": "2026-11-26T15:00:00Z",
+                    "symbols": ["AAPL"],
+                }
+            ]
+        },
+        frozenset({"AAPL"}),
+    )
+    assert revised[0].observed_at == datetime(2026, 11, 26, 11, tzinfo=UTC)
+    assert revised[0].available_at == datetime(2026, 11, 26, 15, tzinfo=UTC)
 
 
 def test_filing_excerpt_prefers_the_event_item() -> None:
@@ -615,13 +633,13 @@ def test_research_policy_distinguishes_evidence_class() -> None:
     close = _row("hist:old-close", "observation", "close", old)
     news = _row("alpaca:news:1:AAPL", "news", "alpaca-news", old)
     original = _row(
-        "sec:fact:AAPL:Revenues:2023-09-30:2023-11-03:10-K:USD",
+        "sec:fact:AAPL:Revenues:2023-09-30:2022-10-01:2023-11-03:10-K:USD",
         "fundamental",
         "sec-companyfacts",
         datetime(2023, 11, 3, tzinfo=UTC),
     )
     amended = _row(
-        "sec:fact:AAPL:Revenues:2023-09-30:2024-02-02:10-K/A:USD",
+        "sec:fact:AAPL:Revenues:2023-09-30:2022-10-01:2024-02-02:10-K/A:USD",
         "fundamental",
         "sec-companyfacts",
         datetime(2024, 2, 2, tzinfo=UTC),
@@ -716,6 +734,95 @@ def test_another_issuers_amendment_does_not_supersede() -> None:
     assert refusal is None
 
 
+def test_two_original_filings_from_one_issuer_both_stay_citable() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    first = CitationRow(
+        evidence_id="sec:filing:one",
+        kind="news",
+        source_label="sec-submissions",
+        summary="8-K accession one report 2024-04-17.",
+        limitations=("SEC submissions row",),
+        observed_at=datetime(2024, 4, 17, 20, tzinfo=UTC),
+        available_at=datetime(2024, 4, 17, 20, tzinfo=UTC),
+        symbol="MSFT",
+    )
+    second = CitationRow(
+        evidence_id="sec:filing:two",
+        kind="news",
+        source_label="sec-submissions",
+        summary="8-K accession two report 2024-04-17.",
+        limitations=("SEC submissions row",),
+        observed_at=datetime(2024, 5, 1, 20, tzinfo=UTC),
+        available_at=datetime(2024, 5, 1, 20, tzinfo=UTC),
+        symbol="MSFT",
+    )
+    refusal = citation_refusal(
+        first, as_of, (first, second), policy="research", max_age_hours=336
+    )
+    assert refusal is None
+
+
+def test_a_different_period_start_does_not_replace_the_fact() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    quarter = _row(
+        "sec:fact:AAPL:Revenues:2024-03-30:2024-01-01:2024-05-02:10-Q:USD",
+        "fundamental",
+        "sec-companyfacts",
+        datetime(2024, 5, 2, tzinfo=UTC),
+    )
+    year = _row(
+        "sec:fact:AAPL:Revenues:2024-03-30:2023-04-01:2024-05-03:10-Q:USD",
+        "fundamental",
+        "sec-companyfacts",
+        datetime(2024, 5, 3, tzinfo=UTC),
+    )
+    refusal = citation_refusal(
+        quarter, as_of, (quarter, year), policy="research", max_age_hours=336
+    )
+    assert refusal is None
+
+
+def test_headlines_do_not_crowd_out_a_current_filing() -> None:
+    window = Window(
+        regime="between",
+        warmup_day=date(2024, 6, 3),
+        decision_days=(date(2024, 6, 4),),
+        settlement_day=date(2024, 6, 5),
+        threshold_index=0,
+        total_return=Decimal("0"),
+        max_drawdown=Decimal("0"),
+        max_runup=Decimal("0"),
+    )
+    filing = TextInput(
+        evidence_id="sec:filing:current",
+        symbol="AAPL",
+        kind="news",
+        observed_at=datetime(2024, 5, 1, tzinfo=UTC),
+        summary="10-Q accession current report 2024-03-30.",
+        source_label="sec-submissions",
+        limitations=("SEC submissions row",),
+    )
+    headlines = tuple(
+        TextInput(
+            evidence_id=f"alpaca:news:{index}:AAPL",
+            symbol="AAPL",
+            kind="news",
+            observed_at=datetime(2024, 5, 20 + index, tzinfo=UTC),
+            summary=f"headline {index}",
+            source_label="alpaca-news",
+            limitations=("headline",),
+        )
+        for index in range(3)
+    )
+    kept = texts_for_window((filing, *headlines), window)
+    assert any(item.evidence_id == "sec:filing:current" for item in kept)
+
+
+def test_a_failed_sip_download_still_leaves_iex_entitled() -> None:
+    assert entitled_feeds({"sip": 200, "iex": 200}) == ("sip", "iex")
+    assert entitled_feeds({"sip": 401, "iex": 200}) == ("iex",)
+
+
 def test_research_policy_does_not_freshen_an_old_fill() -> None:
     decision_at = datetime(2024, 1, 2, 22, tzinfo=UTC)
     trade_at = datetime(2024, 1, 3, 14, 30, tzinfo=UTC)
@@ -781,8 +888,8 @@ def test_historical_book_rejects_superseded_and_accepts_history(
             source_label="fixture",
         )
     )
-    original = "sec:fact:AAPL:Revenues:2023-09-30:2023-11-03:10-K:USD"
-    amended = "sec:fact:AAPL:Revenues:2023-09-30:2024-02-02:10-K/A:USD"
+    original = "sec:fact:AAPL:Revenues:2023-09-30:2022-10-01:2023-11-03:10-K:USD"
+    amended = "sec:fact:AAPL:Revenues:2023-09-30:2022-10-01:2024-02-02:10-K/A:USD"
     study = Study(
         bars=tuple(bars),
         texts=(

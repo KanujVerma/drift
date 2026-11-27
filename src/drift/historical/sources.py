@@ -53,6 +53,7 @@ class TextInput:
     limitations: tuple[str, ...]
     document_name: str | None = None
     report_date: str | None = None
+    available_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,15 @@ class PriceBook:
     price_limitation: str
     splits: frozenset[date]
     gaps: tuple[str, ...]
+
+
+def entitled_feeds(statuses: dict[str, int | None]) -> tuple[Feed, ...]:
+    """SIP before IEX, and only feeds whose probe can be parsed."""
+    chosen: list[Feed] = []
+    for feed in ("sip", "iex"):
+        if alpaca_access_gap(statuses.get(feed), feed) is None:
+            chosen.append(feed)
+    return tuple(chosen)
 
 
 def alpaca_access_gap(status: int | None, feed: str) -> str | None:
@@ -379,7 +389,16 @@ def _fact_row(symbol: str, concept: str, unit: str, row: object) -> TextInput | 
     form = row.get("form")
     value = row.get("val")
     start = row.get("start")
-    start_text = f" period start {start}" if isinstance(start, str) else ""
+    start_key = "none"
+    start_text = ""
+    if isinstance(start, str):
+        try:
+            date.fromisoformat(start[:10])
+        except ValueError:
+            start_key = "none"
+        else:
+            start_key = start[:10]
+            start_text = f" period start {start_key}"
     if (
         not isinstance(end, str)
         or not isinstance(filed, str)
@@ -390,7 +409,9 @@ def _fact_row(symbol: str, concept: str, unit: str, row: object) -> TextInput | 
         return None
     observed = _filed_date_close(filed)
     return TextInput(
-        evidence_id=f"sec:fact:{symbol}:{concept}:{end}:{filed}:{form}:{unit}",
+        evidence_id=(
+            f"sec:fact:{symbol}:{concept}:{end}:{start_key}:{filed}:{form}:{unit}"
+        ),
         symbol=symbol,
         kind="fundamental",
         observed_at=observed,
@@ -627,6 +648,7 @@ def parse_alpaca_news(
         raw_id = item.get("id")
         headline = item.get("headline")
         created = _filing_time(item.get("created_at"))
+        updated = _filing_time(item.get("updated_at"))
         symbols = item.get("symbols")
         if created is None or not isinstance(headline, str) or headline.strip() == "":
             continue
@@ -641,12 +663,16 @@ def parse_alpaca_news(
         for symbol in symbols:
             if not isinstance(symbol, str) or symbol not in allowed:
                 continue
+            available = created
+            if updated is not None and updated > created:
+                available = updated
             found.append(
                 TextInput(
                     evidence_id=f"alpaca:news:{raw_id}:{symbol}",
                     symbol=symbol,
                     kind="news",
                     observed_at=created,
+                    available_at=available,
                     summary=text[:400],
                     source_label="alpaca-news",
                     limitations=(
@@ -686,15 +712,23 @@ def load_alpaca_bars(
             chosen = feed
         elif gap is not None:
             gaps.append(gap)
+    candidates = entitled_feeds(statuses)
+    if not candidates:
+        return None, (), tuple(gaps), "", frozenset()
+    chosen = None
+    bars: tuple[PriceBar, ...] = ()
+    for feed in candidates:
+        fetched, error = _paged_bars(symbols, start, end, feed)
+        present = {bar.symbol for bar in fetched}
+        covered = bool(fetched) and all(symbol in present for symbol in symbols)
+        if error is None and covered:
+            chosen = feed
+            bars = fetched
+            break
+        gaps.append(
+            error or f"Alpaca feed {feed} did not cover every requested symbol."
+        )
     if chosen is None:
-        return None, (), tuple(gaps), "", frozenset()
-    bars, error = _paged_bars(symbols, start, end, chosen)
-    if error is not None or not bars:
-        gaps.append(error or f"Alpaca feed {chosen} returned no daily bars.")
-        return None, (), tuple(gaps), "", frozenset()
-    present = {bar.symbol for bar in bars}
-    if any(symbol not in present for symbol in symbols):
-        gaps.append("Alpaca bars did not cover every requested symbol.")
         return None, (), tuple(gaps), "", frozenset()
     note = (
         f"Feed check SIP HTTP {statuses['sip']}, IEX HTTP {statuses['iex']}. "

@@ -15,7 +15,8 @@ from typing import Literal
 
 _FACT_ID = re.compile(
     r"^sec:fact:(?P<symbol>[A-Z0-9]+):(?P<concept>[A-Za-z0-9]+):"
-    r"(?P<end>\d{4}-\d{2}-\d{2}):(?P<filed>\d{4}-\d{2}-\d{2}):"
+    r"(?P<end>\d{4}-\d{2}-\d{2}):(?P<start>none|\d{4}-\d{2}-\d{2}):"
+    r"(?P<filed>\d{4}-\d{2}-\d{2}):(?P<form>[^:]+):(?P<unit>.+)$"
 )
 _FILING = re.compile(
     r"^(?P<form>10-K/A|10-Q/A|8-K/A|10-K|10-Q|8-K) accession \S+"
@@ -143,7 +144,8 @@ def _superseded(row: CitationRow, as_of: datetime, rows: Sequence[CitationRow]) 
             continue
         if not row.symbol or other.symbol != row.symbol:
             continue
-        if _base_form(parsed.group("form")) == base:
+        later_form = parsed.group("form")
+        if later_form.endswith("/A") and _base_form(later_form) == base:
             return True
     return False
 
@@ -162,6 +164,8 @@ def _later_fact(
         parsed["symbol"] == fact["symbol"]
         and parsed["concept"] == fact["concept"]
         and parsed["end"] == fact["end"]
+        and parsed["start"] == fact["start"]
+        and parsed["unit"] == fact["unit"]
         and parsed["filed"] > fact["filed"]
     )
 

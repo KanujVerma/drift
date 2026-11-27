@@ -25,8 +25,10 @@ volume, volatility, drawdown, filings, and the latest revenue, diluted
 EPS, and, when the periods match, margin and liabilities over assets.
 A close inside 336 hours is a fresh price. An older close can be cited
 as history and is not the fill. News older than 336 hours cannot be
-cited. A financial statement or SEC filing can be cited until a later
-row supersedes it. A superseded or withdrawn row cannot be cited.
+cited. A filing stays citable until a later amendment from the same
+issuer, for the same report date, replaces it. A fact is replaced only
+when the concept, period, and unit match. A superseded or withdrawn row
+cannot be cited.
 Market context is not a citation for another symbol. Filing text is an
 excerpt, untrusted, and not the whole document. The `lessons` book keeps a short
 thesis and outcome for each prior decision and omits the raw decision
