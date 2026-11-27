@@ -10,14 +10,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import urllib.error
 import urllib.parse
-from datetime import UTC, date, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import sleep
 from typing import Literal
 
 from drift.errors import LedgerIntegrityError
+from drift.historical.cases import write_cases
 from drift.historical.replay import (
     BOOKS,
     Study,
@@ -32,16 +35,20 @@ from drift.historical.sources import (
     PriceBar,
     TextInput,
     fetch_json,
+    filing_archive_url,
+    filing_excerpt,
+    load_alpaca_bars,
+    load_alpaca_news,
     parse_company_facts,
     parse_submission_filings,
     parse_yahoo_chart,
-    probe_alpaca,
     restamp_companyfact,
     submission_file_names,
     yahoo_adjustment_note,
     yahoo_split_dates,
 )
 from drift.manager.service import ManagerError
+from drift.prospective.collect import fetch_bytes
 from drift.prospective.config import UNIVERSE
 
 DEFAULT_STATE = Path(".local-artifacts/historical")
@@ -62,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     review.add_argument("--model", choices=("terra", "sol"), required=True)
     review.add_argument("--proposal", type=Path)
     sub.add_parser("report", help="summarize recorded books")
+    sub.add_parser("cases", help="write the frozen between and development prompts")
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help(sys.stderr)
@@ -78,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 proposal=args.proposal,
             )
+        elif args.command == "cases":
+            payload = write_cases(args.state)
         else:
             payload = report(args.state)
     except (OSError, ValueError, ManagerError, LedgerIntegrityError) as error:
@@ -98,10 +108,21 @@ def prepare(state: Path) -> dict[str, object]:
     """Fetch inputs, select windows, and write the frozen criteria."""
     refuse_frozen_relabel(state)
     state.mkdir(parents=True, exist_ok=True)
-    _feed, alpaca_gaps = probe_alpaca()
+    symbols = tuple(symbol for symbol, _cik, _name in UNIVERSE)
+    feed, alpaca_bars, alpaca_gaps, alpaca_note, alpaca_splits = load_alpaca_bars(
+        symbols,
+        "2020-12-01T00:00:00Z",
+        "2026-01-16T00:00:00Z",
+    )
     gaps = list(alpaca_gaps)
-    bars, splits, price_note, price_gaps = _yahoo_prices(state)
-    gaps.extend(price_gaps)
+    if alpaca_bars:
+        bars = list(alpaca_bars)
+        splits: set[date] = set(alpaca_splits)
+        price_note = alpaca_note
+    else:
+        bars, yahoo_splits, price_note, price_gaps = _yahoo_prices(state)
+        gaps.extend(price_gaps)
+        splits = set(yahoo_splits)
     levels, kind, limitation, bench_gaps = _yahoo_benchmark(state)
     gaps.extend(bench_gaps)
     texts, text_gaps = _edgar(state)
@@ -109,7 +130,6 @@ def prepare(state: Path) -> dict[str, object]:
     gaps.append(
         "X posts are not collected; no authorized X API credential is configured"
     )
-    gaps.append("historical news and Alpaca news were not available")
     study = Study(
         bars=tuple(bars),
         texts=tuple(texts),
@@ -136,8 +156,16 @@ def prepare(state: Path) -> dict[str, object]:
         if not blocked:
             break
         windows = select_windows(closes, forbidden=frozenset(forbidden))
+    texts, excerpt_gaps = _attach_excerpts(state, texts, windows)
+    gaps.extend(excerpt_gaps)
+    news, news_gap = _news_for_windows(symbols, windows)
+    if news_gap is not None:
+        gaps.append(news_gap)
+    texts.extend(news)
+    study = replace(study, texts=tuple(texts))
     frozen: dict[str, object] = {
         "alpaca": list(alpaca_gaps),
+        "alpaca_feed": feed,
         "benchmark_kind": kind,
         "benchmark_limitation": limitation,
         "gaps": gaps,
@@ -266,6 +294,8 @@ def _load(state: Path, regime: str) -> tuple[Study, Window]:
             summary=row["summary"],
             source_label=row["source_label"],
             limitations=tuple(row["limitations"]),
+            document_name=_optional_text(row.get("document_name")),
+            report_date=_optional_text(row.get("report_date")),
         )
         for row in cached["texts"]
     )
@@ -312,6 +342,8 @@ def _cache_study(state: Path, study: Study) -> None:
                 "kind": item.kind,
                 "limitations": list(item.limitations),
                 "observed_at": item.observed_at.isoformat(),
+                "document_name": item.document_name,
+                "report_date": item.report_date,
                 "source_label": item.source_label,
                 "summary": item.summary,
                 "symbol": item.symbol,
@@ -449,6 +481,111 @@ def _sec(state: Path, name: str, url: str) -> tuple[object | None, str | None]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload), encoding="utf-8")
     return payload, error
+
+
+def _optional_text(value: object) -> str | None:
+    if isinstance(value, str) and value != "":
+        return value
+    return None
+
+
+def _attach_excerpts(
+    state: Path,
+    texts: list[TextInput],
+    windows: dict[str, Window],
+) -> tuple[list[TextInput], list[str]]:
+    """Replace selected filing rows with a short excerpt of the primary document."""
+    needed: dict[str, TextInput] = {}
+    for window in windows.values():
+        for item in texts_for_window(tuple(texts), window):
+            if item.document_name and item.source_label == "sec-submissions":
+                needed[item.evidence_id] = item
+    if not needed:
+        return texts, []
+    cik_by_symbol = {symbol: cik for symbol, cik, _name in UNIVERSE}
+    gaps: list[str] = []
+    updated: list[TextInput] = []
+    for item in texts:
+        chosen = needed.get(item.evidence_id)
+        if chosen is None or chosen.document_name is None:
+            updated.append(item)
+            continue
+        excerpt, error = _cached_excerpt(
+            state,
+            chosen,
+            cik_by_symbol[chosen.symbol],
+        )
+        if error is not None or excerpt is None:
+            gaps.append(f"{chosen.symbol} filing text {chosen.evidence_id}: {error}")
+            updated.append(item)
+            continue
+        updated.append(
+            replace(
+                item,
+                summary=f"{item.summary} Excerpt: {excerpt}",
+                source_label="sec-filing-text",
+                limitations=item.limitations + ("excerpt is not the full filing",),
+            )
+        )
+    return updated, gaps
+
+
+def _cached_excerpt(
+    state: Path, item: TextInput, cik: str
+) -> tuple[str | None, str | None]:
+    accession = item.evidence_id.removeprefix("sec:filing:")
+    path = state / "raw" / f"excerpt-{accession.replace('/', '-')}.txt"
+    if path.is_file():
+        cached = path.read_text(encoding="utf-8").strip()
+        if cached:
+            return cached, None
+    if item.document_name is None:
+        return None, "filing has no primary document"
+    try:
+        body = fetch_bytes(filing_archive_url(cik, accession, item.document_name))
+    except (OSError, urllib.error.URLError) as error:
+        return None, str(error)
+    sleep(0.2)
+    text = filing_excerpt(body.decode("utf-8", errors="replace"))
+    if not text:
+        return None, "filing document had no visible text"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return text, None
+
+
+def _news_for_windows(
+    symbols: tuple[str, ...], windows: dict[str, Window]
+) -> tuple[list[TextInput], str | None]:
+    if not windows:
+        return [], "No historical window was selected, so news was not requested."
+    allowed = frozenset(symbols)
+    found: dict[str, TextInput] = {}
+    gaps: list[str] = []
+    for name, window in sorted(windows.items()):
+        start = datetime.combine(
+            window.decision_days[0] - timedelta(days=20),
+            datetime.min.time(),
+            tzinfo=UTC,
+        )
+        end = datetime.combine(
+            window.settlement_day + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=UTC,
+        )
+        rows, gap = load_alpaca_news(
+            symbols,
+            start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            allowed,
+        )
+        if gap is not None:
+            gaps.append(f"{name}: {gap}")
+        for item in rows:
+            found.setdefault(item.evidence_id, item)
+    if gaps:
+        return list(found.values()), " ".join(gaps)
+    return list(found.values()), None
 
 
 if __name__ == "__main__":

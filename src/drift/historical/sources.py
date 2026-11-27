@@ -7,8 +7,10 @@ and filings. Yahoo chart bars are the labeled fallback for prices.
 
 from __future__ import annotations
 
+import html
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,6 +51,8 @@ class TextInput:
     summary: str
     source_label: str
     limitations: tuple[str, ...]
+    document_name: str | None = None
+    report_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -251,6 +255,10 @@ def parse_company_facts(symbol: str, payload: object) -> tuple[TextInput, ...]:
         "Revenues",
         "SalesRevenueNet",
         "EarningsPerShareDiluted",
+        "NetIncomeLoss",
+        "OperatingIncomeLoss",
+        "Assets",
+        "Liabilities",
     )
     for concept in concepts:
         block = gaap.get(concept)
@@ -281,6 +289,8 @@ def parse_submission_filings(symbol: str, payload: object) -> tuple[TextInput, .
         return ()
     if not isinstance(filed, list):
         filed = []
+    documents = recent.get("primaryDocument")
+    reports = recent.get("reportDate")
     rows: list[TextInput] = []
     allowed = {"10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "8-K/A"}
     for index, form in enumerate(forms):
@@ -293,18 +303,23 @@ def parse_submission_filings(symbol: str, payload: object) -> tuple[TextInput, .
         if observed is None:
             continue
         accession = accessions[index]
+        document = _column(documents, index)
+        report = _report_date(_column(reports, index))
+        report_text = f" report {report}" if report is not None else ""
         rows.append(
             TextInput(
                 evidence_id=f"sec:filing:{accession}",
                 symbol=symbol,
                 kind="news",
                 observed_at=observed,
-                summary=f"{form} accession {accession}.",
+                summary=f"{form} accession {accession}{report_text}.",
                 source_label="sec-submissions",
                 limitations=(
                     "SEC submissions row; not the full filing text; "
                     "not origin authentication",
                 ),
+                document_name=document,
+                report_date=report,
             )
         )
     return tuple(rows)
@@ -403,6 +418,25 @@ def _recent_table(payload: object) -> dict[str, object] | None:
     if isinstance(payload.get("form"), list):
         return payload
     return None
+
+
+def _column(values: object, index: int) -> str | None:
+    if not isinstance(values, list) or index >= len(values):
+        return None
+    item = values[index]
+    if not isinstance(item, str) or item == "":
+        return None
+    return item
+
+
+def _report_date(value: str | None) -> str | None:
+    if value is None or len(value) < 10:
+        return None
+    try:
+        date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+    return value[:10]
 
 
 def _filing_time(value: object) -> datetime | None:
@@ -527,3 +561,294 @@ def fetch_json(url: str) -> tuple[object | None, str | None]:
         return json.loads(body), None
     except json.JSONDecodeError as error:
         return None, str(error)
+
+
+def filing_excerpt(body: str, limit: int = 900) -> str:
+    """Visible text from one filing, preferring the item that states the event."""
+    cleaned = re.sub(r"(?is)<(script|style)\b.*?>.*?</\1>", " ", body)
+    cleaned = re.sub(r"(?is)<[^>]+>", " ", cleaned)
+    cleaned = html.unescape(cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    lowered = cleaned.casefold()
+    for marker in ("item 2.02", "item 1.01", "item 8.01", "item 7"):
+        at = lowered.find(marker)
+        if at >= 0:
+            return cleaned[at : at + limit]
+    return cleaned[:limit]
+
+
+def filing_archive_url(cik: str, accession: str, document: str) -> str:
+    """SEC archive URL for one primary document. The CIK is unpadded."""
+    return (
+        "https://www.sec.gov/Archives/edgar/data/"
+        f"{int(cik)}/{accession.replace('-', '')}/{document}"
+    )
+
+
+def parse_alpaca_corporate_actions(payload: object) -> tuple[frozenset[date], int]:
+    """Split ex-dates and the count of cash dividends. Dividends are not prices."""
+    if not isinstance(payload, dict):
+        return frozenset(), 0
+    actions = payload.get("corporate_actions")
+    if not isinstance(actions, dict):
+        return frozenset(), 0
+    splits: set[date] = set()
+    for key in ("forward_splits", "reverse_splits"):
+        group = actions.get(key)
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            if not isinstance(item, dict) or not isinstance(item.get("ex_date"), str):
+                continue
+            try:
+                splits.add(date.fromisoformat(item["ex_date"][:10]))
+            except ValueError:
+                continue
+    dividends = actions.get("cash_dividends")
+    count = 0
+    if isinstance(dividends, list):
+        count = sum(isinstance(item, dict) for item in dividends)
+    return frozenset(splits), count
+
+
+def parse_alpaca_news(
+    payload: object, allowed: frozenset[str]
+) -> tuple[TextInput, ...]:
+    """Headlines attributed only to symbols named on the article."""
+    if not isinstance(payload, dict):
+        return ()
+    rows = payload.get("news")
+    if not isinstance(rows, list):
+        return ()
+    found: list[TextInput] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("id")
+        headline = item.get("headline")
+        created = _filing_time(item.get("created_at"))
+        symbols = item.get("symbols")
+        if created is None or not isinstance(headline, str) or headline.strip() == "":
+            continue
+        if isinstance(raw_id, bool) or not isinstance(raw_id, int | str):
+            continue
+        if not isinstance(symbols, list):
+            continue
+        blurb = item.get("summary")
+        text = headline.strip()
+        if isinstance(blurb, str) and blurb.strip():
+            text = f"{text} {blurb.strip()}"
+        for symbol in symbols:
+            if not isinstance(symbol, str) or symbol not in allowed:
+                continue
+            found.append(
+                TextInput(
+                    evidence_id=f"alpaca:news:{raw_id}:{symbol}",
+                    symbol=symbol,
+                    kind="news",
+                    observed_at=created,
+                    summary=text[:400],
+                    source_label="alpaca-news",
+                    limitations=(
+                        "Alpaca news headline; not the full article; "
+                        "not origin authentication",
+                    ),
+                )
+            )
+    return tuple(found)
+
+
+def load_alpaca_bars(
+    symbols: tuple[str, ...],
+    start: str,
+    end: str,
+) -> tuple[str | None, tuple[PriceBar, ...], tuple[str, ...], str, frozenset[date]]:
+    """SIP first, then IEX. Raw bars only. A refusal does not invent a price."""
+    if credential_names() is None:
+        return (
+            None,
+            (),
+            (
+                "Alpaca credentials are not in the environment or .env. "
+                "No new credential was created.",
+            ),
+            "",
+            frozenset(),
+        )
+    gaps: list[str] = []
+    statuses: dict[str, int | None] = {}
+    chosen: Feed | None = None
+    for feed in ("sip", "iex"):
+        status = _alpaca_status(feed)
+        statuses[feed] = status
+        gap = alpaca_access_gap(status, feed)
+        if gap is None and chosen is None:
+            chosen = feed
+        elif gap is not None:
+            gaps.append(gap)
+    if chosen is None:
+        return None, (), tuple(gaps), "", frozenset()
+    bars, error = _paged_bars(symbols, start, end, chosen)
+    if error is not None or not bars:
+        gaps.append(error or f"Alpaca feed {chosen} returned no daily bars.")
+        return None, (), tuple(gaps), "", frozenset()
+    present = {bar.symbol for bar in bars}
+    if any(symbol not in present for symbol in symbols):
+        gaps.append("Alpaca bars did not cover every requested symbol.")
+        return None, (), tuple(gaps), "", frozenset()
+    note = (
+        f"Feed check SIP HTTP {statuses['sip']}, IEX HTTP {statuses['iex']}. "
+        f"Book uses Alpaca {chosen} daily bars, adjustment=raw, "
+        "rounded half-up to cents. Not dividend-adjusted."
+    )
+    if _adjustment_changes(symbols[0], chosen):
+        note += " Alpaca adjustment=all changed a sampled close versus raw."
+    splits, dividends, action_gap = _corporate_actions(symbols, start, end)
+    if action_gap is not None:
+        gaps.append(action_gap)
+    if dividends:
+        note += f" {dividends} cash dividends were observed and are not credited."
+    return chosen, bars, tuple(gaps), note, splits
+
+
+def load_alpaca_news(
+    symbols: tuple[str, ...],
+    start: str,
+    end: str,
+    allowed: frozenset[str],
+) -> tuple[tuple[TextInput, ...], str | None]:
+    """Headlines in one window. An empty page is a coverage gap, not silence."""
+    if credential_names() is None:
+        return (), (
+            "Alpaca credentials are not in the environment or .env. "
+            "No new credential was created."
+        )
+    found: list[TextInput] = []
+    token: str | None = None
+    for _page in range(5):
+        query = {
+            "symbols": ",".join(symbols),
+            "start": start,
+            "end": end,
+            "limit": "50",
+        }
+        if token is not None:
+            query["page_token"] = token
+        payload, status = _alpaca_json("/v1beta1/news", query)
+        if status != 200 or payload is None:
+            return tuple(found), f"Alpaca news returned HTTP {status}."
+        found.extend(parse_alpaca_news(payload, allowed))
+        raw_token = (
+            payload.get("next_page_token") if isinstance(payload, dict) else None
+        )
+        if not isinstance(raw_token, str) or raw_token == "":
+            if not found:
+                return (), (
+                    "Alpaca news returned no articles for this window. "
+                    "An empty page is not proof that nothing was published."
+                )
+            return tuple(found), None
+        token = raw_token
+    return tuple(found), "Alpaca news results were truncated at five pages."
+
+
+def _paged_bars(
+    symbols: tuple[str, ...], start: str, end: str, feed: Feed
+) -> tuple[tuple[PriceBar, ...], str | None]:
+    rows: list[PriceBar] = []
+    token: str | None = None
+    for _page in range(20):
+        query = {
+            "adjustment": "raw",
+            "end": end,
+            "feed": feed,
+            "limit": "10000",
+            "start": start,
+            "symbols": ",".join(symbols),
+            "timeframe": "1Day",
+        }
+        if token is not None:
+            query["page_token"] = token
+        payload, status = _alpaca_json(ALPACA_BARS_ROUTE, query)
+        if status != 200 or payload is None:
+            return tuple(rows), f"Alpaca bars returned HTTP {status} for feed {feed}."
+        if isinstance(payload, dict):
+            bars = payload.get("bars")
+            if isinstance(bars, dict):
+                for symbol in symbols:
+                    rows.extend(parse_alpaca_bars(symbol, payload, feed))
+        raw_token = (
+            payload.get("next_page_token") if isinstance(payload, dict) else None
+        )
+        if not isinstance(raw_token, str) or raw_token == "":
+            return tuple(rows), None
+        token = raw_token
+    return tuple(rows), f"Alpaca bars for feed {feed} were truncated."
+
+
+def _adjustment_changes(symbol: str, feed: Feed) -> bool:
+    query = {
+        "end": "2024-11-08T00:00:00Z",
+        "feed": feed,
+        "limit": "5",
+        "start": "2024-11-01T00:00:00Z",
+        "symbols": symbol,
+        "timeframe": "1Day",
+    }
+    raw_query = dict(query)
+    raw_query["adjustment"] = "raw"
+    all_query = dict(query)
+    all_query["adjustment"] = "all"
+    raw, raw_status = _alpaca_json(ALPACA_BARS_ROUTE, raw_query)
+    adjusted, adjusted_status = _alpaca_json(ALPACA_BARS_ROUTE, all_query)
+    if raw_status != 200 or adjusted_status != 200:
+        return False
+    left = {bar.day: bar.close_price for bar in parse_alpaca_bars(symbol, raw, feed)}
+    right = {
+        bar.day: bar.close_price for bar in parse_alpaca_bars(symbol, adjusted, feed)
+    }
+    return any(left[day] != right[day] for day in set(left) & set(right))
+
+
+def _corporate_actions(
+    symbols: tuple[str, ...], start: str, end: str
+) -> tuple[frozenset[date], int, str | None]:
+    payload, status = _alpaca_json(
+        "/v1/corporate-actions",
+        {
+            "end": end[:10],
+            "limit": "1000",
+            "start": start[:10],
+            "symbols": ",".join(symbols),
+            "types": "forward_split,reverse_split,cash_dividend",
+        },
+    )
+    if status != 200 or payload is None:
+        return frozenset(), 0, f"Alpaca corporate actions returned HTTP {status}."
+    splits, dividends = parse_alpaca_corporate_actions(payload)
+    return splits, dividends, None
+
+
+def _alpaca_json(path: str, query: dict[str, str]) -> tuple[object | None, int | None]:
+    names = credential_names()
+    if names is None:
+        return None, None
+    env = dict(os.environ)
+    env.update(_dotenv(Path(".env")))
+    request = urllib.request.Request(
+        f"{ALPACA_DATA_HOST}{path}?{urllib.parse.urlencode(query)}",
+        headers={
+            "APCA-API-KEY-ID": env[names[0]],
+            "APCA-API-SECRET-KEY": env[names[1]],
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            status = response.status if isinstance(response.status, int) else None
+            return json.loads(response.read().decode("utf-8")), status
+    except urllib.error.HTTPError as error:
+        return None, error.code
+    except OSError, UnicodeError, urllib.error.URLError, json.JSONDecodeError:
+        return None, None

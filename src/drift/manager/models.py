@@ -273,6 +273,7 @@ class SimulationMandate(FrozenModel):
     max_position_notional_fraction: str
     min_cash_after: str
     max_evidence_age_hours: int = Field(gt=0)
+    citation_policy: Literal["uniform_age", "research"] = "uniform_age"
     fill_fee: str
     fill_price_source: Literal[
         "cited_observation_price",

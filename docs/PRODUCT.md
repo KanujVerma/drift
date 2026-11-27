@@ -27,7 +27,7 @@ See [architecture](ARCHITECTURE.md) for current capabilities and boundaries and
 - Robinhood is the only intended broker. Paper validation comes before a future,
   separately authorized $100 pilot. Neither intention permits a broker
   connection, an order or use of capital today.
-- Future model evaluation is limited to GPT-6.1 Tera Extra High and GPT-6.2 Sol
+- Future model evaluation is limited to GPT-6.1 Terra Extra High and GPT-6.2 Sol
   Extra High, then Hermes only if justified. Jev and other models are deferred.
   This is a plan, not permission to run evaluations or incur costs.
 
