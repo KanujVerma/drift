@@ -37,8 +37,8 @@ the prompt told the model to copy.
 | between 2026-10-16 | baseline | Sol | hold AAPL | not replayed; empty evidence, same abstention shape |
 | development 2026-11-09 | research | Terra | hold SPY | not replayed; empty evidence, same abstention shape |
 | development 2026-11-09 | research | Sol | hold AAPL | not replayed; empty evidence, same abstention shape |
-| development 2026-11-09 | baseline | Terra | buy 5 AAPL | accepted, fill waits for the next open |
-| development 2026-11-09 | baseline | Sol | buy 2 AAPL | rejected: citations include MSFT, JNJ, and SPY |
+| development 2026-11-09 | baseline | Terra | buy 5 AAPL | accepted under both citation policies; fill waits for the next open |
+| development 2026-11-09 | baseline | Sol | buy 2 AAPL | rejected under both policies: citations include MSFT, JNJ, and SPY |
 
 Token counts are input, output, and reasoning output:
 
@@ -63,11 +63,15 @@ On 2026-11-09 the note-issuance 8-K was in the prompt as filing text, and
 the annual figures were inside 336 hours, so both rules could cite them.
 Both research decisions held and treated the headlines and the filing as
 uncertain. Baseline Terra bought 5 AAPL and cited only Apple revenue, EPS,
-and the 2026-11-09 close. The ledger accepted it and did not fill at that
-close. Baseline Sol bought 2 AAPL but also cited other symbols, so the
-ledger rejected the proposal. The shorter baseline prompt did not repeat
-the cross-symbol citation rule that the research prompt states, so that
-rejection is not by itself a comparison of the age rule.
+and the 2026-11-09 close. Those facts were 137 hours old, so both the
+research rule and the 336-hour rule accept them. The book did not fill at
+that close. Baseline Sol bought 2 AAPL but also cited MSFT, JNJ, and SPY.
+Both policies reject that proposal. The case ledgers themselves use the
+research mandate. The baseline statuses above were checked again by running
+the same proposals through `decide_proposal` with `citation_policy` set to
+`uniform_age`. The shorter baseline prompt did not repeat the cross-symbol
+citation rule that the research prompt states, so Sol's rejection is not
+by itself a comparison of the age rule.
 
 No decision cited a superseded row or a future filing. No decision was
 graded on the next close.
