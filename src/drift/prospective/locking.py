@@ -26,7 +26,10 @@ def pilot_lock(state: Path) -> Iterator[None]:
             raise ValueError("pilot state is busy") from None
         token = _held.set(held | {state})
         try:
-            yield
+            from drift.prospective.window import window_scope
+
+            with window_scope(state):
+                yield
         finally:
             _held.reset(token)
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

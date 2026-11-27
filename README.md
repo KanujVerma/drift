@@ -9,7 +9,7 @@ that product; they are not the product's final purpose.
 **Current boundary:** This repository contains offline research proposal
 validation, evidence, portfolio accounting, risk building blocks, and a
 simulation-only supervised portfolio cycle (`python -m drift.manager`).
-`python -m drift.prospective` runs the v0.2 prospective simulation described
+`python -m drift.prospective` provides the supervised prospective workflow described
 in [docs/V02.md](docs/V02.md). `python -m drift.historical` replays the same
 cycle on past prices without writing those books; see
 [docs/HISTORICAL.md](docs/HISTORICAL.md). It does not include a broker adapter or order

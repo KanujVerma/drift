@@ -2528,7 +2528,7 @@ def test_readiness_exercises_trade_settlement_without_observation_seal(
         bars=(
             Bar(
                 "AAPL",
-                issued - timedelta(days=2),
+                datetime(2026, 11, 20, 14, 30, tzinfo=UTC),
                 "100",
                 "101",
                 issued,

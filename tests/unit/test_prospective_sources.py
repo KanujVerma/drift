@@ -835,10 +835,13 @@ def test_relative_state_uses_stable_absolute_context_paths(
     tmp_path: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from argparse import Namespace
+    from dataclasses import replace
     from pathlib import Path
 
     from test_prospective_pilot_safety import collection
+    from test_prospective_window import _nyse_html
 
+    from drift.prospective import window
     from drift.prospective.__main__ import _run
 
     assert isinstance(tmp_path, Path)
@@ -846,8 +849,22 @@ def test_relative_state_uses_stable_absolute_context_paths(
     working.mkdir()
     monkeypatch.chdir(working)
     when = datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
+    received = datetime(2026, 11, 27, 13, 0, tzinfo=UTC)
+    monkeypatch.setattr(window, "_clock", lambda: received)
+    monkeypatch.setattr(window, "_fetch_nyse", lambda: (_nyse_html(), received))
+    window.configure_window(tmp_path / "state")
+    bar = Bar(
+        "AAPL",
+        datetime(2026, 11, 25, 14, 30, tzinfo=UTC),
+        "100",
+        "101",
+        when,
+        "alpaca-bars-v2-iex-raw",
+        covered_until=when,
+    )
     monkeypatch.setattr(
-        "drift.prospective.__main__.collect_live", lambda *_: collection(when)
+        "drift.prospective.__main__.collect_live",
+        lambda *_: replace(collection(when), bars=(bar,)),
     )
     _run(
         Namespace(

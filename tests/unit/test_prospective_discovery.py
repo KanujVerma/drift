@@ -242,10 +242,12 @@ def test_daily_saves_screen_and_compact_context_in_both_books(tmp_path: object) 
 
     assert isinstance(tmp_path, Path)
     when = datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
+    days = [when - timedelta(days=offset) for offset in range(100, 0, -1)]
+    sessions = [day for day in days if day.weekday() < 5][-64:]
     bars = tuple(
         Bar(
             "AAPL",
-            when - timedelta(days=65 - i),
+            day,
             "100",
             str(100 + i),
             when,
@@ -253,7 +255,7 @@ def test_daily_saves_screen_and_compact_context_in_both_books(tmp_path: object) 
             "10000000",
             when,
         )
-        for i in range(64)
+        for i, day in enumerate(sessions)
     )
     perform_daily(tmp_path, "observation", when, replace(collection(when), bars=bars))
     for name in ("terra", "sol"):

@@ -12,13 +12,17 @@ import argparse
 import json
 import sys
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from drift.errors import LedgerIntegrityError
 from drift.manager.service import ManagerError
 from drift.prospective.collect import Collection, collect_live, load_suggestions
-from drift.prospective.config import eligibility_message
+from drift.prospective.config import (
+    eligibility_message,
+    in_settlement_window,
+    observation_date,
+)
 from drift.prospective.run import (
     apply_proposal,
     pending_benchmark_after,
@@ -43,6 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     collect = sub.add_parser("collect", help="fetch public inputs and write a report")
     _now(collect)
+    configure = sub.add_parser(
+        "configure-window", help="capture NYSE data and configure a future window"
+    )
+    configure.add_argument(
+        "--start", type=date.fromisoformat, help="earliest desired date, YYYY-MM-DD"
+    )
     daily = sub.add_parser("daily", help="collect, update books, and export contexts")
     _now(daily)
     daily.add_argument("--role", choices=("observation", "readiness"), required=True)
@@ -102,6 +112,27 @@ def _run_locked(args: argparse.Namespace) -> dict[str, object]:
     args.state = args.state.resolve()
     if args.state.is_relative_to(source_tree):
         raise ValueError("prospective state must be outside the source tree")
+    if args.command == "configure-window":
+        from drift.prospective.window import PILOT_VERSION, configure_window
+
+        window = configure_window(args.state, requested_start=args.start)
+        return {
+            "status": "configured",
+            "pilot_version": PILOT_VERSION,
+            "source_received_at": window.source_received_at.isoformat()
+            if window.source_received_at
+            else None,
+            "source_sha256": window.source_sha256,
+            "observation_dates": [day.isoformat() for day in window.observation_dates],
+            "settlement_dates": [day.isoformat() for day in window.settlement_dates],
+        }
+    if args.command == "resolve-expired" or (
+        args.command == "submit" and args.role == "observation"
+    ):
+        from drift.prospective.window import active_window, verify_current_window
+
+        if active_window() is not None:
+            verify_current_window(args.state)
     if args.command == "resolve-expired":
         return dict[str, object](
             resolve_expired_review(
@@ -118,6 +149,20 @@ def _run_locked(args: argparse.Namespace) -> dict[str, object]:
         }
     if args.command == "daily" and args.role == "observation" and args.proposal:
         raise ValueError("submit observation proposals before collecting new data")
+    if args.command == "daily" and args.role == "observation":
+        from drift.prospective.window import active_window
+
+        if active_window() is None and not any(
+            (args.state / "observation" / f"{name}.sqlite").exists()
+            for name in ("terra", "sol")
+        ):
+            return {
+                "status": "window_not_configured",
+                "eligibility": (
+                    "configure a source-checked future window before "
+                    "opening observation books"
+                ),
+            }
     pending: list[str] = []
     if args.command == "daily" and args.role == "observation":
         recover_shared_inputs(args.state, args.role)
@@ -126,6 +171,34 @@ def _run_locked(args: argparse.Namespace) -> dict[str, object]:
             pending = restore_pending_observation_reviews(args.state)
             if not pending_reviews_expired(args.state, pending, datetime.now(UTC)):
                 return {"status": "pending_reviews", "models": pending}
+        from drift.prospective.window import active_window
+
+        now = datetime.now(UTC)
+        configured = active_window()
+        if configured is not None:
+            if (
+                observation_date(now) != configured.dates[0]
+                and now >= configured.calendar.open(configured.dates[0])
+                and not any(
+                    (args.state / "observation" / f"{name}.sqlite").exists()
+                    for name in ("terra", "sol")
+                )
+            ):
+                return {
+                    "status": "fresh_window_required",
+                    "eligibility": (
+                        "the first session passed without opening books; "
+                        "use a new state directory"
+                    ),
+                }
+            if observation_date(now) is None and not in_settlement_window(now):
+                return {
+                    "status": "not_eligible",
+                    "eligibility": eligibility_message(now),
+                }
+            from drift.prospective.window import verify_current_window
+
+            verify_current_window(args.state)
     suggestions_path = getattr(args, "suggestions", None)
     suggestions = (
         load_suggestions(suggestions_path) if suggestions_path is not None else ()
@@ -198,9 +271,41 @@ def _run_locked(args: argparse.Namespace) -> dict[str, object]:
             collection = collect_live(moment)
         return _write_collection(args.state, collection)
     if args.command == "status":
+        from drift.prospective.window import active_window
+
+        book_status = status_report(args.state, args.role, moment)
+        configured = active_window()
+        if (
+            args.role == "observation"
+            and configured is None
+            and not any(
+                (args.state / "observation" / f"{name}.sqlite").exists()
+                for name in ("terra", "sol")
+            )
+        ):
+            book_status["window_configuration"] = "not_configured"
+            book_status["observation_dates"] = []
+            return {
+                "eligibility": "configure a source-checked future window",
+                "status": book_status,
+            }
+        book_status["window_configuration"] = (
+            "configured" if configured is not None else "legacy"
+        )
+        if configured is not None:
+            from drift.prospective.window import PILOT_VERSION
+
+            book_status["pilot_version"] = PILOT_VERSION
+            book_status["window_source_sha256"] = configured.source_sha256
+            book_status["window_source_received_at"] = (
+                configured.source_received_at.isoformat()
+                if configured.source_received_at is not None
+                else None
+            )
+            book_status["window_binding"] = configured.binding
         return {
             "eligibility": eligibility_message(moment),
-            "status": status_report(args.state, args.role, moment),
+            "status": book_status,
         }
     if args.command != "daily":
         message = f"unknown command {args.command}"

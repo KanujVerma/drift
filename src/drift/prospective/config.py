@@ -17,6 +17,9 @@ from drift.manager.models import (
     SimulationSession,
 )
 from drift.memory.recorder import deterministic_memory_uuid7
+from drift.prospective.window import NYSECalendar as NYSECalendar
+from drift.prospective.window import active_window
+from drift.prospective.window import build_window as build_window
 from drift.research.universe import RESEARCH_UNIVERSE
 
 NY = ZoneInfo("America/New_York")
@@ -79,20 +82,44 @@ def trading_dates(count: int) -> tuple[date, ...]:
 
 
 def observation_dates() -> tuple[date, ...]:
+    active = active_window()
+    if active is not None:
+        return active.observation_dates
     return trading_dates(OBSERVATION_COUNT)
 
 
 def calendar_dates() -> tuple[date, ...]:
+    active = active_window()
+    if active is not None:
+        return active.dates
     return trading_dates(OBSERVATION_COUNT + FILL_TAIL)
+
+
+def is_session_day(day: date) -> bool:
+    active = active_window()
+    if active is None:
+        return day.weekday() < 5 and day not in HOLIDAYS
+    try:
+        return active.calendar.is_session(day)
+    except ValueError:
+        return False
 
 
 def session_open_utc(day: date) -> datetime:
     """09:30 America/New_York, converted to UTC for that date."""
-    return datetime.combine(day, time(9, 30), tzinfo=NY).astimezone(UTC)
+    active = active_window()
+    return (
+        active.calendar.open(day)
+        if active is not None
+        else datetime.combine(day, time(9, 30), tzinfo=NY).astimezone(UTC)
+    )
 
 
 def session_close_utc(day: date) -> datetime:
     """16:00 America/New_York, or 13:00 on an early close, converted to UTC."""
+    active = active_window()
+    if active is not None:
+        return active.calendar.close(day)
     hour = 13 if day in EARLY_CLOSE else 16
     return datetime.combine(day, time(hour, 0), tzinfo=NY).astimezone(UTC)
 
@@ -140,7 +167,9 @@ def session_for(day: date) -> SimulationSession:
     """
     return SimulationSession(
         local_date=day,
-        opened_at=datetime.combine(day, time(14, 30), tzinfo=UTC),
+        opened_at=session_open_utc(day)
+        if active_window() is not None
+        else datetime.combine(day, time(14, 30), tzinfo=UTC),
         closed_at=datetime.combine(day, time(23, 59), tzinfo=UTC),
     )
 
@@ -228,7 +257,7 @@ def next_session_open(moment: datetime) -> datetime | None:
     """Next 09:30 America/New_York open in the observation window."""
     local = moment.astimezone(NY)
     for day in observation_dates():
-        opened = datetime.combine(day, time(9, 30), tzinfo=NY)
+        opened = session_open_utc(day).astimezone(NY)
         if opened > local:
             return opened
     return None
@@ -242,7 +271,9 @@ def eligibility_message(moment: datetime) -> str | None:
     if opened is None:
         return "the 20-session observation window has no remaining open"
     early = ""
-    if opened.astimezone(NY).date() in EARLY_CLOSE:
+    active = active_window()
+    early_closes = active.calendar.early_closes if active is not None else EARLY_CLOSE
+    if opened.astimezone(NY).date() in early_closes:
         early = " NYSE lists an early close at 13:00 America/New_York."
     stamp = opened.astimezone(NY).strftime("%Y-%m-%d %H:%M %Z")
     return (

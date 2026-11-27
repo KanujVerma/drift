@@ -116,6 +116,25 @@ def _pilot_book(mandate: SimulationMandate) -> bool:
     )
 
 
+def _require_window_binding(packet: ResearchPacket, mandate: SimulationMandate) -> None:
+    if PROSPECTIVE_SEAL_REQUIRED not in mandate.acknowledgements:
+        return
+    from drift.prospective.window import active_window
+
+    markers = [
+        item
+        for item in packet.limitations
+        if item.startswith("prospective-window-sha256:")
+    ]
+    configured = active_window()
+    if not markers and configured is None:
+        return  # Existing v0.2 pilot books retain their original calendar.
+    if configured is None or markers != [
+        f"prospective-window-sha256:{configured.binding}"
+    ]:
+        raise ValueError("book and configured prospective window do not match")
+
+
 def _serialize_pilot_book[**P, R](
     method: Callable[Concatenate[PortfolioManager, P], R],
 ) -> Callable[Concatenate[PortfolioManager, P], R]:
@@ -129,6 +148,8 @@ def _serialize_pilot_book[**P, R](
             from drift.prospective.locking import pilot_lock
 
             with pilot_lock(path.parent.parent):
+                packet, mandate, *_ = replay(self._ledger.verified_events())
+                _require_window_binding(packet, mandate)
                 return method(self, *args, **kwargs)
         return method(self, *args, **kwargs)
 
@@ -162,6 +183,7 @@ class PortfolioManager:
     def _open_locked(
         cls, path: Path, packet: ResearchPacket, mandate: SimulationMandate
     ) -> tuple[PortfolioManager, Json]:
+        _require_window_binding(packet, mandate)
         _require_mandate_alignment(packet, mandate)
         if path.exists():
             return cls._reopen(path, packet, mandate)
@@ -835,6 +857,7 @@ class PortfolioManager:
             model_identity=None,
         )
 
+    @_serialize_pilot_book
     def context(self, as_of: datetime) -> Json:
         """Point-in-time inputs, decisions, and outcomes for a later review."""
         events = self._ledger.verified_events()
@@ -969,6 +992,7 @@ class PortfolioManager:
         }
         return body
 
+    @_serialize_pilot_book
     def report(self, as_of: datetime) -> Json:
         """Performance, risk inputs, benchmark, and system costs, kept apart."""
         events = self._ledger.verified_events()
@@ -1584,7 +1608,7 @@ def _session_bounds(packet: ResearchPacket, day: date) -> tuple[datetime, dateti
 def _valid_pilot_close(
     item: EvidenceItem, symbol: str, opening_packet: ResearchPacket | None
 ) -> bool:
-    from drift.prospective.config import NY, session_close_utc
+    from drift.prospective.config import NY, is_session_day, session_close_utc
 
     labels = {
         row.source_label
@@ -1593,6 +1617,8 @@ def _valid_pilot_close(
         and row.source_label in {"alpaca-bars-v2-iex-raw", "alpaca-bars-v2-sip-raw"}
     }
     day = item.observed_at.astimezone(NY).date()
+    if not is_session_day(day):
+        return False
     return (
         len(labels) == 1
         and item.source_label in labels
@@ -2028,9 +2054,9 @@ def _valid_pilot_trade(
     benchmark: bool = False,
 ) -> bool:
     from drift.prospective.config import (
-        HOLIDAYS,
         NY,
         calendar_dates,
+        is_session_day,
         session_close_utc,
         session_open_utc,
     )
@@ -2074,8 +2100,7 @@ def _valid_pilot_trade(
     return bool(
         observed == item.observed_at
         and day in allowed
-        and day.weekday() < 5
-        and day not in HOLIDAYS
+        and is_session_day(day)
         and session_open_utc(day) <= observed <= session_close_utc(day)
     )
 

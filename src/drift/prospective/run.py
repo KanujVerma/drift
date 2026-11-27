@@ -405,6 +405,7 @@ def _reconcile_ingest_suffix(
         raise ValueError("input reconciliation did not restore matching histories")
 
 
+@serialized
 def pending_observation_reviews(state: Path) -> list[str]:
     """Find unresolved durable reviews before fetching another observation."""
     root = state / "observation"
@@ -432,6 +433,7 @@ def pending_observation_reviews(state: Path) -> list[str]:
     return pending
 
 
+@serialized
 def stored_price_feed(state: Path, role: str) -> Literal["sip", "iex"] | None:
     """Read the one feed already present in the books before any new download."""
     labels: set[str] = set()
@@ -463,6 +465,7 @@ def _price_feed_label(label: str) -> str:
     return label
 
 
+@serialized
 def pending_trade_requests(
     state: Path, role: str = "observation"
 ) -> tuple[tuple[str, datetime], ...]:
@@ -490,6 +493,7 @@ def pending_trade_requests(
     return tuple(sorted(requests))
 
 
+@serialized
 def used_trade_ids(state: Path, role: str) -> frozenset[str]:
     from drift.manager.service import _pending_executions
 
@@ -503,6 +507,7 @@ def used_trade_ids(state: Path, role: str) -> frozenset[str]:
     return frozenset(used)
 
 
+@serialized
 def pending_benchmark_after(state: Path) -> datetime | None:
     """Start a shared SPY baseline after both first sealed decisions, while in cash."""
     seals: list[datetime] = []
@@ -541,6 +546,7 @@ def pending_benchmark_after(state: Path) -> datetime | None:
     return max(seals)
 
 
+@serialized
 def pending_reviews_expired(state: Path, names: list[str], now: datetime) -> bool:
     """True only when every pending review has passed its next-session cutoff."""
     if not names:
@@ -1646,6 +1652,7 @@ def _execution_barriers(ledger: SQLiteLedger, as_of: datetime) -> dict[str, date
     return barriers
 
 
+@serialized
 def status_report(state: Path, role: str, as_of: datetime) -> dict[str, Json]:
     """Recover each book and report it. Recovery is the restart check."""
     reports: dict[str, Json] = {}

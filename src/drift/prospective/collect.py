@@ -33,16 +33,17 @@ from drift.manager.models import (
     SimulationSession,
 )
 from drift.prospective.config import (
-    HOLIDAYS,
     NY,
     bar_session_day,
     calendar_dates,
+    is_session_day,
     observation_dates,
     pilot_instruments,
     session_close_utc,
     session_for,
     session_open_utc,
 )
+from drift.prospective.window import active_window
 from drift.research.universe import RESEARCH_UNIVERSE
 
 # EDGAR rejects agents that do not look like "Name email".
@@ -437,11 +438,7 @@ def collect_trades(
     gaps: list[str] = []
     for symbol, boundary in sorted(requests):
         boundary_day = boundary.astimezone(NY).date()
-        extra = (
-            (boundary_day,)
-            if boundary_day.weekday() < 5 and boundary_day not in HOLIDAYS
-            else ()
-        )
+        extra = (boundary_day,) if is_session_day(boundary_day) else ()
         for day in sorted(set(calendar_dates()) | set(extra)):
             opened, closed = session_open_utc(day), session_close_utc(day)
             if closed <= boundary or opened > end:
@@ -560,13 +557,9 @@ def _collect_trade_window(
                 previous = observed
                 # Conservative eligibility: only ordinary regular-way prints.
                 trade_day = observed.astimezone(NY).date()
-                regular_session = (
-                    trade_day.weekday() < 5
-                    and trade_day not in HOLIDAYS
-                    and session_open_utc(trade_day)
-                    <= observed
-                    <= session_close_utc(trade_day)
-                )
+                regular_session = is_session_day(trade_day) and session_open_utc(
+                    trade_day
+                ) <= observed <= session_close_utc(trade_day)
                 try:
                     source_id = canonical_trade_id(
                         feed, symbol, row["t"], exchange, identifier
@@ -715,6 +708,7 @@ def collect_live(
                     action.kind,
                     action.received_at,
                 )
+    calendar_skips: dict[tuple[str, int], list[date]] = {}
     for bar in downloaded:
         if not isinstance(bar, TimedPriceBar) or bar.received_at is None:
             gaps.append(f"{bar.symbol} prices: response receipt time unavailable")
@@ -738,6 +732,9 @@ def collect_live(
                 )
             elif key not in split_rows:
                 split_rows[key] = row
+        if active_window() is not None and not is_session_day(bar.day):
+            calendar_skips.setdefault((bar.symbol, bar.day.year), []).append(bar.day)
+            continue
         bars.append(
             Bar(
                 symbol=bar.symbol,
@@ -749,6 +746,11 @@ def collect_live(
                 volume=bar.volume,
                 covered_until=datetime.fromisoformat(end.replace("Z", "+00:00")),
             )
+        )
+    for (symbol, year), days in sorted(calendar_skips.items()):
+        gaps.append(
+            f"{symbol} prices: {len(days)} dates in {year} were not verified "
+            f"as NYSE sessions ({min(days)} through {max(days)})"
         )
     if splits - {row.ex_date for row in split_rows.values()}:
         gaps.append("corporate action split attribution is incomplete")
@@ -863,6 +865,9 @@ def build_packet(collection: Collection, *, readiness: bool) -> ResearchPacket:
         notes.append("readiness drill; this book is not an observation session")
         settlement: tuple[date, ...] = ()
     else:
+        configured = active_window()
+        if configured is not None:
+            notes.append(f"prospective-window-sha256:{configured.binding}")
         observed = set(observation_dates())
         settlement = tuple(day for day in calendar_dates() if day not in observed)
     limitations = tuple(notes)
@@ -918,6 +923,8 @@ def _evidence_items(collection: Collection, when: datetime) -> list[EvidenceItem
         if bar.observed_at > when:
             continue
         day = bar_session_day(bar.observed_at)
+        if active_window() is not None and not is_session_day(day):
+            continue
         opened = session_open_utc(day)
         closed = session_close_utc(day)
         # A missing fetch time must not inherit the batch clock. That clock
@@ -1376,6 +1383,8 @@ def _close_is_final(bar: Bar, when: datetime) -> bool:
     if bar.close_price is None:
         return False
     day = bar_session_day(bar.observed_at)
+    if active_window() is not None and not is_session_day(day):
+        return False
     return when >= session_close_utc(day)
 
 
