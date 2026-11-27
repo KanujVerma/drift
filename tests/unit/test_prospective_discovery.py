@@ -268,6 +268,49 @@ def test_future_split_waits_for_new_york_date_in_review() -> None:
     assert after["unadjusted_splits"] == {"AAPL": "2026-01-06"}
 
 
+def test_evening_fundamental_uses_new_york_date_without_future_leak() -> None:
+    from drift.prospective.discovery import review_context
+
+    as_of = datetime(2026, 11, 28, 4, 0, tzinfo=UTC)
+    close_at = datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
+    fact_at = datetime(2026, 11, 28, 3, 30, tzinfo=UTC)
+    close: dict[str, object] = {
+        "available_at": close_at.isoformat(),
+        "observed_at": close_at.isoformat(),
+        "evidence_id": "aapl-close",
+        "kind": "observation",
+        "price": "100",
+        "price_role": "close",
+        "source_label": "fixture",
+        "summary": "Daily close 100 for AAPL. Volume 10000000.",
+        "symbol": "AAPL",
+    }
+    fact: dict[str, object] = {
+        "available_at": fact_at.isoformat(),
+        "observed_at": fact_at.isoformat(),
+        "evidence_id": "aapl-eps",
+        "kind": "fundamental",
+        "price": None,
+        "price_role": None,
+        "source_label": "sec-companyfacts",
+        "summary": "EarningsPerShareDiluted 5 USD period end 2025-12-31.",
+        "symbol": "AAPL",
+    }
+    future = dict(fact)
+    future.update(
+        available_at=(as_of + timedelta(minutes=1)).isoformat(),
+        observed_at=(as_of + timedelta(minutes=1)).isoformat(),
+        evidence_id="future-eps",
+        summary="EarningsPerShareDiluted 10 USD period end 2026-09-30.",
+    )
+    result = review_context(
+        {"book": {"cash": "10000", "holdings": []}, "evidence": [close, fact, future]},
+        as_of,
+    )
+    row = next(row for row in result["screen"] if row["symbol"] == "AAPL")
+    assert row["price_over_eps"] == "20.00"
+
+
 def test_daily_saves_screen_and_compact_context_in_both_books(tmp_path: object) -> None:
     import json
     from dataclasses import replace

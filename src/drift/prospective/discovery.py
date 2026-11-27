@@ -10,7 +10,6 @@ from drift.manager.corporate_actions import split_date
 from drift.prospective.config import NY, TRADING_SYMBOLS
 from drift.research.book import (
     _close_point,
-    _day,
     _is_close,
     _retain_displayed,
     _visible_at,
@@ -82,7 +81,9 @@ def review_context(context: dict[str, object], as_of: datetime) -> dict[str, obj
     closes = [_close_point(item) for item in evidence if _is_close(item)]
     facts = [
         FactPoint(
-            symbol=str(item["symbol"]), day=_day(item), summary=str(item["summary"])
+            symbol=str(item["symbol"]),
+            day=datetime.fromisoformat(str(item["observed_at"])).astimezone(NY).date(),
+            summary=str(item["summary"]),
         )
         for item in evidence
         if item.get("kind") == "fundamental"
