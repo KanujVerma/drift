@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "drift"
-version = "0.1.0"
-description = "Research evidence kernel"
+version = "0.2.0"
+description = "Simulation-only AI portfolio manager"
 requires-python = ">=3.14"
 dependencies = [
     "pydantic>=2.0,<3.0",

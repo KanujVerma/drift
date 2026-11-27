@@ -52,10 +52,17 @@ economics are related but distinct measures.
   accepts timestamped local inputs and a structured buy, sell, or hold
   proposal, checks it against the current book and an explicit simulation-only
   mandate, and applies eligible fills through the portfolio accounting kernel.
-  State is stored in the retained SQLite ledger. Later inputs are appended
-  with `ingest` and stay invisible to context, proposal checks, marks, and
-  benchmark reports until their availability time, including when an earlier
-  time is replayed. The cycle does not call M1d
+  A hold with no cited evidence is a recorded abstention and does not weaken
+  buy or sell checks. Cited-price books still fill at the cited observation.
+  `post_decision_execution` books record the decision first and fill only from
+  a trade observation whose observation time and availability time are both
+  later. Return ratios that do not terminate in the portfolio decimal context
+  are reported half-even at 12 decimal places and marked inexact. Benchmark
+  series are labeled; an unlabeled or price-only series is not called S&P 500
+  total return. State is stored in the retained SQLite ledger. Later inputs
+  are appended with `ingest` and stay invisible until their availability time.
+  [V02](V02.md) is the prospective two-book workflow on that cycle. It does
+  not call M1d
   observation validation ([#135](https://github.com/KanujVerma/drift/issues/135)),
   realized-session stamp binding
   ([#151](https://github.com/KanujVerma/drift/issues/151)), the retired router

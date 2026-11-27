@@ -86,6 +86,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     _ledger(ingest)
     ingest.add_argument("--batch", type=Path, required=True)
+    execute = sub.add_parser(
+        "execute",
+        help="fill pending trades from later trade observations",
+    )
+    _ledger(execute)
+    execute.add_argument("--as-of", required=True)
     session = sub.add_parser("session", help="supervised command session")
     _ledger(session)
     return parser
@@ -107,6 +113,8 @@ def _run(args: argparse.Namespace) -> Json:
     if args.command == "propose":
         proposal = InvestmentProposal.model_validate_json(_read(args.proposal))
         return manager.propose(proposal)
+    if args.command == "execute":
+        return manager.execute_pending(_as_of(args.as_of))
     if args.command == "mark":
         return manager.mark(_as_of(args.as_of))
     if args.command == "context":
@@ -129,7 +137,7 @@ def _run(args: argparse.Namespace) -> Json:
 def _session(path: Path) -> Json:
     print(
         "simulation-only session. Commands: context, report, propose, "
-        "mark, reflect, feedback, ingest, help, quit.",
+        "execute, mark, reflect, feedback, ingest, help, quit.",
         file=sys.stderr,
     )
     last: Json = {"status": "session"}
@@ -147,6 +155,7 @@ def _session(path: Path) -> Json:
                     "context ASOF",
                     "report ASOF",
                     "propose PATH",
+                    "execute ASOF",
                     "mark ASOF",
                     "reflect PATH",
                     "feedback PATH",
@@ -164,6 +173,8 @@ def _session(path: Path) -> Json:
         elif command == "propose":
             proposal = InvestmentProposal.model_validate_json(_read(Path(argument)))
             last = manager.propose(proposal)
+        elif command == "execute":
+            last = manager.execute_pending(_as_of(argument))
         elif command == "mark":
             last = manager.mark(_as_of(argument))
         elif command == "reflect":

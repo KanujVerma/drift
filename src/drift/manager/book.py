@@ -54,6 +54,7 @@ MARK = "manager.mark"
 REFLECTION = "manager.reflection"
 FEEDBACK = "manager.feedback"
 INGEST = "manager.ingest"
+FILL = "manager.fill"
 
 CLOCK_LIMITATIONS = tuple(
     sorted(
@@ -369,10 +370,12 @@ def load_inputs(
     payload = thaw(events[0].payload)
     packet_data = payload["packet"]
     mandate_data = payload["mandate"]
+    # Hash the stored JSON, not the model after new default fields are filled.
+    # A ledger written before series_kind existed keeps its original book id.
+    packet_hash = content_hash(packet_data)
+    mandate_hash = content_hash(mandate_data)
     packet = ResearchPacket.model_validate_json(json.dumps(packet_data))
     mandate = SimulationMandate.model_validate_json(json.dumps(mandate_data))
-    packet_hash = identity_hash(packet)
-    mandate_hash = identity_hash(mandate)
     if payload.get("packet_hash") != packet_hash:
         message = "stored packet hash does not match the stored packet"
         raise LedgerIntegrityError(message)
@@ -482,7 +485,9 @@ def replay(
             continue
         if event.event_type == DECISION and payload.get("status") != "accepted":
             continue
-        if event.event_type in (DECISION, MARK):
+        if event.event_type == FILL and payload.get("status") != "filled":
+            continue
+        if event.event_type in (DECISION, MARK, FILL):
             apply_recorded_effect(kernel, packet, payload)
             continue
         if event.event_type in (REFLECTION, FEEDBACK):

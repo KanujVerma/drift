@@ -554,7 +554,11 @@ def test_supplied_benchmark_is_labeled_and_absent_series_stay_unavailable(
     benchmark = _mapping(report["benchmark_relative"])
     assert benchmark["status"] == "available"
     assert benchmark["series_change"] == "0.1"
+    assert benchmark["series_change_exact"] is True
     assert benchmark["portfolio_change"] == "-0.0001"
+    assert benchmark["portfolio_change_exact"] is True
+    assert benchmark["series_kind"] == "unspecified"
+    assert "not S&P 500 total return" in str(benchmark["series_label"])
     assert "not an index calculation" in str(benchmark["reason"])
 
 
@@ -1149,6 +1153,348 @@ def test_ingest_rejects_an_unknown_symbol(tmp_path: Path) -> None:
     )
     with pytest.raises(ManagerError, match="not consistent"):
         manager.ingest(batch)
+
+
+def _deferred_mandate(**overrides: object) -> SimulationMandate:
+    values = _mandate().model_dump(mode="python")
+    values["fill_price_source"] = "post_decision_execution"
+    values.update(overrides)
+    return SimulationMandate.model_validate(values)
+
+
+def test_abstention_records_no_action_without_invented_citations(
+    tmp_path: Path,
+) -> None:
+    manager, _path = _open(tmp_path, "abstain.sqlite")
+    abstained = _mapping(
+        manager.propose(
+            _proposal(
+                proposal_id=deterministic_memory_uuid7("manager-abstain"),
+                action="hold",
+                quantity=0,
+                evidence_ids=(),
+                exit_conditions=(),
+                thesis="Nothing cited is enough to trade.",
+                uncertainty="No fresh fundamental, news, or observation is cited.",
+                allocation_reasoning="No simulated shares.",
+            )
+        )
+    )
+    assert abstained["status"] == "accepted"
+    assert abstained["fill"] is None
+    assert any(reason.startswith("abstained:") for reason in _reasons(abstained))
+    assert _snapshot(abstained)["cash"] == "10000"
+    with pytest.raises(ValidationError):
+        _proposal(evidence_ids=())
+    stale_hold = _mapping(
+        manager.propose(
+            _proposal(
+                proposal_id=deterministic_memory_uuid7("manager-stale-hold"),
+                action="hold",
+                quantity=0,
+                evidence_ids=("ev-stale",),
+                as_of=datetime(2026, 1, 5, 16, 5, tzinfo=UTC),
+                thesis="A stale close is not a reason to trade.",
+            )
+        )
+    )
+    assert stale_hold["status"] == "rejected"
+    assert any(reason.startswith("stale_evidence:") for reason in _reasons(stale_hold))
+    assert _snapshot(stale_hold)["cash"] == "10000"
+
+
+def test_nonterminating_benchmark_ratio_uses_documented_precision(
+    tmp_path: Path,
+) -> None:
+    points = (
+        BenchmarkPoint(
+            available_at=OPEN,
+            level="568.64",
+            limitations=("supplied level, not an index vendor calculation",),
+            series_kind="price_only_substitute",
+        ),
+        BenchmarkPoint(
+            available_at=MARK_AT,
+            level="597.19",
+            limitations=("Yahoo close, not S&P 500 total return",),
+            series_kind="price_only_substitute",
+        ),
+    )
+    packet = _packet().model_copy(update={"benchmark": points})
+    manager, _opened = PortfolioManager.open(
+        tmp_path / "ratio.sqlite", packet, _mandate()
+    )
+    assert _mapping(manager.propose(_proposal()))["status"] == "accepted"
+    assert _mapping(manager.mark(MARK_AT))["status"] == "marked"
+    benchmark = _mapping(_mapping(manager.report(MARK_AT))["benchmark_relative"])
+    assert benchmark["status"] == "available"
+    assert benchmark["series_change_exact"] is False
+    assert benchmark["series_kind"] == "price_only_substitute"
+    assert "price-only substitute" in str(benchmark["series_label"])
+    rendered = benchmark["series_change"]
+    assert isinstance(rendered, str)
+    assert len(rendered.split(".")[1]) == 12
+    from decimal import Decimal
+    from fractions import Fraction
+
+    target = Fraction(Decimal("597.19") - Decimal("568.64")) / Fraction(
+        Decimal("568.64")
+    )
+    assert abs(Fraction(Decimal(rendered)) - target) <= Fraction(1, 10**12)
+
+
+def test_post_decision_fill_ignores_hindsight_future_and_duplicates(
+    tmp_path: Path,
+) -> None:
+    early = _evidence(
+        "ev-early-trade",
+        "observation",
+        "ACME",
+        datetime(2026, 1, 5, 15, 30, tzinfo=UTC),
+        "Print from before the decision.",
+        price="99",
+        price_role="trade",
+    )
+    later = _evidence(
+        "ev-tue-open",
+        "observation",
+        "ACME",
+        datetime(2026, 1, 6, 14, 35, tzinfo=UTC),
+        "Tuesday open after Monday's decision.",
+        price="101",
+        price_role="trade",
+    )
+    future = _evidence(
+        "ev-future-trade",
+        "observation",
+        "ACME",
+        datetime(2026, 1, 7, 14, 35, tzinfo=UTC),
+        "Wednesday open, not available on Tuesday.",
+        price="120",
+        price_role="trade",
+    )
+    extra = (early, later, future)
+    packet = _packet().model_copy(update={"evidence": _packet().evidence + extra})
+    path = tmp_path / "causal.sqlite"
+    manager, opened = PortfolioManager.open(path, packet, _deferred_mandate())
+    assert opened == {"status": "opened"}
+    pending = _mapping(manager.propose(_proposal()))
+    assert pending["status"] == "accepted"
+    assert pending["fill"] is None
+    assert any(reason.startswith("pending_execution:") for reason in _reasons(pending))
+    assert _snapshot(pending)["cash"] == "10000"
+    too_soon = _mapping(manager.execute_pending(MARK_AT))
+    assert too_soon["status"] == "pending"
+    assert _mapping(manager.context(MARK_AT))["book"]
+    filled = _mapping(manager.execute_pending(datetime(2026, 1, 6, 15, 0, tzinfo=UTC)))
+    assert filled["status"] == "filled"
+    rows = filled["results"]
+    assert isinstance(rows, list)
+    assert _mapping(rows[0])["status"] == "filled"
+    assert _mapping(_mapping(rows[0])["fill"])["fill_price"] == "101"
+    assert _snapshot(filled)["cash"] == "8989"
+    again = _mapping(manager.execute_pending(datetime(2026, 1, 6, 15, 30, tzinfo=UTC)))
+    assert again["status"] == "idle"
+    restored = PortfolioManager.recover(path)
+    report = _mapping(restored.report(datetime(2026, 1, 6, 15, 30, tzinfo=UTC)))
+    assert report["cash"] == "8989"
+    lots = report["positions"]
+    assert isinstance(lots, list)
+    assert _mapping(lots[0])["quantity"] == 10
+
+
+def test_stale_or_oversized_execution_does_not_invent_a_fill(
+    tmp_path: Path,
+) -> None:
+    later = _evidence(
+        "ev-tue-open",
+        "observation",
+        "ACME",
+        datetime(2026, 1, 6, 14, 35, tzinfo=UTC),
+        "Tuesday open.",
+        price="101",
+        price_role="trade",
+    )
+    packet = _packet().model_copy(update={"evidence": _packet().evidence + (later,)})
+    stale_book, _opened = PortfolioManager.open(
+        tmp_path / "stale-fill.sqlite",
+        packet,
+        _deferred_mandate(max_evidence_age_hours=1),
+    )
+    assert (
+        _mapping(
+            stale_book.propose(
+                _proposal(
+                    proposal_id=deterministic_memory_uuid7("manager-stale-fill"),
+                    evidence_ids=("ev-close",),
+                )
+            )
+        )["status"]
+        == "accepted"
+    )
+    stale = _mapping(
+        stale_book.execute_pending(datetime(2026, 1, 6, 16, 0, tzinfo=UTC))
+    )
+    assert stale["status"] == "rejected"
+    assert _snapshot(stale)["cash"] == "10000"
+    assert (
+        _mapping(stale_book.execute_pending(datetime(2026, 1, 6, 16, 30, tzinfo=UTC)))[
+            "status"
+        ]
+        == "idle"
+    )
+
+    risk_book, _opened = PortfolioManager.open(
+        tmp_path / "risk-fill.sqlite", packet, _deferred_mandate()
+    )
+    assert (
+        _mapping(
+            risk_book.propose(
+                _proposal(
+                    proposal_id=deterministic_memory_uuid7("manager-risk-fill"),
+                    quantity=40,
+                )
+            )
+        )["status"]
+        == "accepted"
+    )
+    rejected = _mapping(
+        risk_book.execute_pending(datetime(2026, 1, 6, 15, 0, tzinfo=UTC))
+    )
+    assert rejected["status"] == "rejected"
+    assert any(
+        reason.startswith("unsafe_position_limit:")
+        for reason in _reasons(_mapping(_rows(rejected["results"])[0]))
+    )
+    assert _snapshot(rejected)["cash"] == "10000"
+
+
+def test_fill_advances_the_clock_and_blocks_a_backdated_decision(
+    tmp_path: Path,
+) -> None:
+    later = _evidence(
+        "ev-tue-open",
+        "observation",
+        "ACME",
+        datetime(2026, 1, 6, 14, 35, tzinfo=UTC),
+        "Tuesday open.",
+        price="101",
+        price_role="trade",
+    )
+    packet = _packet().model_copy(update={"evidence": _packet().evidence + (later,)})
+    path = tmp_path / "clock.sqlite"
+    manager, _opened = PortfolioManager.open(path, packet, _deferred_mandate())
+    assert _mapping(manager.propose(_proposal()))["status"] == "accepted"
+    filled_at = datetime(2026, 1, 6, 15, 0, tzinfo=UTC)
+    assert _mapping(manager.execute_pending(filled_at))["status"] == "filled"
+    backdated = _mapping(
+        manager.propose(
+            _proposal(
+                proposal_id=deterministic_memory_uuid7("manager-backdated-sell"),
+                as_of=datetime(2026, 1, 6, 14, 45, tzinfo=UTC),
+                action="sell",
+                quantity=10,
+                evidence_ids=("ev-tue-close",),
+            )
+        )
+    )
+    assert backdated["status"] == "rejected"
+    assert any(
+        reason.startswith("decision_before_recorded_state:")
+        for reason in _reasons(backdated)
+    )
+    PortfolioManager.recover(path)
+
+
+def test_execution_age_uses_the_observation_time(tmp_path: Path) -> None:
+    trade = _evidence(
+        "ev-old-print",
+        "observation",
+        "ACME",
+        datetime(2026, 1, 6, 14, 35, tzinfo=UTC),
+        "Open downloaded later.",
+        price="101",
+        price_role="trade",
+    ).model_copy(update={"available_at": datetime(2026, 1, 6, 16, 30, tzinfo=UTC)})
+    packet = _packet().model_copy(update={"evidence": _packet().evidence + (trade,)})
+    manager, _opened = PortfolioManager.open(
+        tmp_path / "age.sqlite",
+        packet,
+        _deferred_mandate(max_evidence_age_hours=1),
+    )
+    assert (
+        _mapping(
+            manager.propose(
+                _proposal(
+                    proposal_id=deterministic_memory_uuid7("manager-age-buy"),
+                    evidence_ids=("ev-close",),
+                )
+            )
+        )["status"]
+        == "accepted"
+    )
+    executed = _mapping(
+        manager.execute_pending(datetime(2026, 1, 6, 17, 0, tzinfo=UTC))
+    )
+    assert executed["status"] == "rejected"
+    row = _mapping(_rows(executed["results"])[0])
+    assert any(reason.startswith("stale_evidence:") for reason in _reasons(row))
+    assert _snapshot(executed)["cash"] == "10000"
+
+
+def test_legacy_packet_without_series_kind_keeps_its_book_id() -> None:
+    from drift.domain.events import AuditEvent
+    from drift.manager.book import OPENED, load_inputs
+    from drift.serialization.canonical import content_hash
+
+    raw_packet = json.loads(_packet(benchmark=True).model_dump_json())
+    for point in raw_packet["benchmark"]:
+        assert isinstance(point, dict)
+        point.pop("series_kind", None)
+    raw_mandate = json.loads(_mandate().model_dump_json())
+    packet_hash = content_hash(raw_packet)
+    mandate_hash = content_hash(raw_mandate)
+    book_id = deterministic_memory_uuid7(f"manager-book:{packet_hash}")
+    event = AuditEvent.model_construct(
+        event_id=deterministic_memory_uuid7("legacy-open"),
+        event_type=OPENED,
+        timestamp=OPEN,
+        entity_type="portfolio_book",
+        entity_id=book_id,
+        payload={
+            "mandate": raw_mandate,
+            "mandate_hash": mandate_hash,
+            "packet": raw_packet,
+            "packet_hash": packet_hash,
+        },
+        previous_event_hash="0" * 64,
+        deduplication_key="legacy-open",
+        schema_version="1",
+        event_hash="1" * 64,
+    )
+    _packet_model, _mandate_model, loaded_hash, _mh, loaded_id = load_inputs((event,))
+    assert loaded_hash == packet_hash
+    assert loaded_id == book_id
+
+
+def test_settlement_session_rejects_a_new_decision(tmp_path: Path) -> None:
+    packet = _packet().model_copy(update={"settlement_only_dates": (TUESDAY,)})
+    manager, _opened = PortfolioManager.open(
+        tmp_path / "settle.sqlite", packet, _mandate()
+    )
+    refused = _mapping(
+        manager.propose(
+            _proposal(
+                proposal_id=deterministic_memory_uuid7("manager-settlement-buy"),
+                as_of=TUESDAY_AT,
+            )
+        )
+    )
+    assert refused["status"] == "rejected"
+    assert any(
+        "only settles earlier decisions" in reason for reason in _reasons(refused)
+    )
+    assert _snapshot(refused)["cash"] == "10000"
 
 
 def test_manager_does_not_import_unresolved_defect_paths() -> None:

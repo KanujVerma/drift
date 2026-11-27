@@ -7,11 +7,11 @@ broker, or a market-data provider.
 import os
 import tempfile
 from collections.abc import Callable
-from datetime import date, datetime
-from decimal import Decimal
+from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -24,6 +24,7 @@ from drift.ledger.sqlite import SQLiteLedger
 from drift.manager.book import (
     DECISION,
     FEEDBACK,
+    FILL,
     INGEST,
     MARK,
     OPENED,
@@ -45,7 +46,12 @@ from drift.manager.book import (
     take_snapshot,
     thaw,
 )
-from drift.manager.decide import Decision, RecordedOutcome, decide_proposal
+from drift.manager.decide import (
+    Decision,
+    RecordedOutcome,
+    decide_proposal,
+    fill_limit_reasons,
+)
 from drift.manager.models import (
     EvidenceItem,
     FeedbackNote,
@@ -63,7 +69,8 @@ from drift.serialization.canonical import canonical_json
 REPORT_LIMITATIONS = (
     "configured simulation fees are not a market fee schedule",
     "content hashes check consistency only and do not authenticate origin",
-    "fills use the cited observation price and are not market executions",
+    "cited fills use the cited observation price and are not market executions",
+    "post-decision fills use a later trade observation and are not market executions",
     "investment results and system costs are separate",
     "missing system costs stay unknown and are not treated as zero",
     "the book is exploratory simulation, not promotion evidence",
@@ -73,6 +80,20 @@ REPORT_LIMITATIONS = (
 )
 
 type Json = None | bool | int | str | list["Json"] | dict[str, "Json"]
+
+# Return ratios are not cash. Exact values stay exact. Ordinary index
+# returns do not terminate in the 34-digit portfolio context, so those
+# are half-even at 12 decimal places and labeled inexact.
+RETURN_RATIO_PLACES = 12
+RETURN_RATIO_PRECISION = (
+    "exact ratios stay exact in the 34-digit half-even portfolio context; "
+    "every other finite ratio is half-even at 12 decimal places and is not cash"
+)
+_SERIES_LABELS = {
+    "unspecified": ("caller did not label the series; it is not S&P 500 total return"),
+    "sp500_total_return": "S&P 500 total return levels supplied by the caller",
+    "price_only_substitute": "price-only substitute, not S&P 500 total return",
+}
 
 
 class ManagerError(DriftError):
@@ -158,6 +179,7 @@ class PortfolioManager:
         target = session_for(packet, proposal.as_of)
         current = kernel.state.session_key.local_date
         session_ok = target is not None and target >= current
+        defer_execution = mandate.fill_price_source == "post_decision_execution"
         decision = decide_proposal(
             proposal=proposal,
             packet=packet,
@@ -169,7 +191,24 @@ class PortfolioManager:
             current_session=clock,
             session_date_ok=session_ok,
             session_in_future=target is None and proposal.as_of > clock,
+            defer_execution=defer_execution,
         )
+        if target is not None and target in packet.settlement_only_dates:
+            kept = tuple(
+                reason
+                for reason in decision.reasons
+                if not reason.startswith(("accepted:", "pending_execution:"))
+            )
+            decision = Decision(
+                status="rejected",
+                reasons=kept
+                + (
+                    "decision_outside_session: this session only settles "
+                    "earlier decisions",
+                ),
+                fill_price=None,
+                price_evidence_id=None,
+            )
         if _indeterminate(kernel):
             decision = Decision(
                 status="rejected",
@@ -180,6 +219,24 @@ class PortfolioManager:
             )
         advances: list[str] = []
         fill: Json = None
+        reasons = decision.reasons
+        pending_trade = (
+            decision.status == "accepted"
+            and defer_execution
+            and proposal.action != "hold"
+        )
+        if pending_trade:
+            fill_state = "pending"
+            reasons = reasons + (
+                "pending_execution: the fill waits for a trade observation "
+                "after this decision",
+            )
+        elif decision.status == "accepted" and proposal.action == "hold":
+            fill_state = "not_applicable"
+        elif decision.status == "accepted":
+            fill_state = "filled"
+        else:
+            fill_state = "not_applicable"
         if decision.status == "accepted":
             if target is None:
                 message = "accepted proposal has no session"
@@ -187,7 +244,7 @@ class PortfolioManager:
             advances = advance_dates(packet, current, target)
             for day in advances:
                 kernel.advance_session(simulation_session_key(date.fromisoformat(day)))
-            if proposal.action != "hold":
+            if proposal.action != "hold" and not defer_execution:
                 if decision.fill_price is None or decision.price_evidence_id is None:
                     message = "accepted trade is missing a fill price"
                     raise ManagerError(message)
@@ -209,12 +266,13 @@ class PortfolioManager:
         payload: dict[str, Json] = {
             "advances": cast(list[Json], advances),
             "fill": fill,
+            "fill_state": fill_state,
             "inference": proposal.inference,
             "model_identity": proposal.model_identity,
             "outcome_id": f"outcome:{proposal.proposal_id}",
             "proposal": model_json(proposal),
             "proposal_hash": identity_hash(proposal),
-            "reasons": cast(list[Json], list(decision.reasons)),
+            "reasons": cast(list[Json], list(reasons)),
             "snapshot": take_snapshot(kernel, packet),
             "status": decision.status,
             "system_cost": (
@@ -250,13 +308,182 @@ class PortfolioManager:
             raise LedgerIntegrityError(message)
         return _result(
             status=decision.status,
-            reasons=decision.reasons,
+            reasons=reasons,
             proposal_id=str(proposal.proposal_id),
             snapshot=_public_book(checked_kernel, checked, proposal.as_of),
             fill=fill,
             inference=proposal.inference,
             model_identity=proposal.model_identity,
         )
+
+    def execute_pending(self, as_of: datetime) -> Json:
+        """Fill accepted trades from a later trade observation, once each.
+
+        A cited-price book is refused. Missing, stale, future, and
+        pre-decision observations do not become fills.
+        """
+        events = self._ledger.verified_events()
+        packet, mandate, _ph, _mh, book_id, kernel = replay(events)
+        packet = packet_through(events, until=as_of)
+        if mandate.fill_price_source != "post_decision_execution":
+            return {
+                "results": [],
+                "reasons": [
+                    "unsupported_evidence: this book fills at the cited "
+                    "observation price"
+                ],
+                "status": "rejected",
+            }
+        clock = _kernel_time(events)
+        if as_of < clock:
+            return {
+                "results": [],
+                "reasons": [
+                    "decision_before_recorded_state: "
+                    "as_of is before the latest book time"
+                ],
+                "status": "rejected",
+            }
+        target = session_for(packet, as_of)
+        current = kernel.state.session_key.local_date
+        if target is None or target < current:
+            return {
+                "results": [],
+                "reasons": [
+                    "decision_outside_session: execution time is outside the "
+                    "current simulation book"
+                ],
+                "status": "rejected",
+            }
+        pending, used = _pending_executions(events, as_of)
+        if not pending:
+            return {"results": [], "reasons": [], "status": "idle"}
+        results: list[Json] = []
+        head = _head(events)
+        advanced = False
+        advances = advance_dates(packet, current, target)
+        for item in pending:
+            found = _next_trade_observation(
+                packet,
+                mandate,
+                symbol=item.symbol,
+                decision_at=item.as_of,
+                as_of=as_of,
+                used=used,
+            )
+            if found is None:
+                results.append(
+                    {
+                        "proposal_id": item.proposal_id,
+                        "reasons": [
+                            "pending_execution: no trade observation after "
+                            "the decision is available"
+                        ],
+                        "status": "pending",
+                    }
+                )
+                continue
+            chosen, refusal = found
+            if refusal is not None:
+                results.append(
+                    _record_unfilled(
+                        self._ledger,
+                        book_id=book_id,
+                        as_of=as_of,
+                        item=item,
+                        reason=refusal,
+                        evidence_id=chosen.evidence_id,
+                        head=head,
+                    )
+                )
+                head = _head(self._ledger.verified_events())
+                used.add(chosen.evidence_id)
+                continue
+            if chosen.price is None:
+                message = "trade observation is missing a price"
+                raise ManagerError(message)
+            limit_reasons = fill_limit_reasons(
+                action=item.action,
+                symbol=item.symbol,
+                quantity=item.quantity,
+                fill_price=chosen.price,
+                mandate=mandate,
+                cash=kernel.state.cash_balance,
+                cost_basis_by_symbol=_costs(kernel, packet),
+                quantity_by_symbol=_quantities(kernel, packet),
+            )
+            if limit_reasons:
+                results.append(
+                    _record_unfilled(
+                        self._ledger,
+                        book_id=book_id,
+                        as_of=as_of,
+                        item=item,
+                        reason=limit_reasons[0],
+                        evidence_id=chosen.evidence_id,
+                        head=head,
+                    )
+                )
+                head = _head(self._ledger.verified_events())
+                used.add(chosen.evidence_id)
+                continue
+            step_advances = advances if not advanced else []
+            if not advanced:
+                for day in advances:
+                    kernel.advance_session(
+                        simulation_session_key(date.fromisoformat(day))
+                    )
+                advanced = True
+            fill = _execution_fill(packet, mandate, item, chosen)
+            apply_fill_json(kernel, fill)
+            payload: dict[str, Json] = {
+                "advances": cast(list[Json], step_advances),
+                "fill": fill,
+                "price_evidence_id": chosen.evidence_id,
+                "proposal_id": item.proposal_id,
+                "reasons": ["filled: trade observation after the decision"],
+                "snapshot": take_snapshot(kernel, packet),
+                "status": "filled",
+            }
+            appended = append_manager_event(
+                self._ledger,
+                book_id=book_id,
+                event_type=FILL,
+                dedup_key=f"fill:{item.proposal_id}",
+                timestamp=as_of,
+                payload=payload,
+                expected_previous_hash=head,
+            )
+            head = appended.event_hash
+            used.add(chosen.evidence_id)
+            _checked, *_ignored, checked_kernel = replay(self._ledger.verified_events())
+            if take_snapshot(checked_kernel, packet) != payload["snapshot"]:
+                message = "recorded fill does not replay"
+                raise LedgerIntegrityError(message)
+            kernel = checked_kernel
+            results.append(
+                {
+                    "fill": fill,
+                    "proposal_id": item.proposal_id,
+                    "reasons": ["filled: trade observation after the decision"],
+                    "status": "filled",
+                }
+            )
+        status = "pending"
+        if any(
+            isinstance(row, dict) and row.get("status") == "filled" for row in results
+        ):
+            status = "filled"
+        elif any(
+            isinstance(row, dict) and row.get("status") == "rejected" for row in results
+        ):
+            status = "rejected"
+        return {
+            "reasons": [],
+            "results": cast(Json, results),
+            "snapshot": _public_book(kernel, packet, as_of),
+            "status": status,
+        }
 
     def mark(self, as_of: datetime) -> Json:
         """Mark held names at cited close observations. Partial marks are refused."""
@@ -375,12 +602,20 @@ class PortfolioManager:
         decisions: list[Json] = []
         feedback: list[Json] = []
         reflections: list[Json] = []
+        settlements = _settlements(events, as_of)
         for event in events:
             if event.timestamp > as_of:
                 continue
             payload = thaw(event.payload)
             if event.event_type == DECISION:
-                decisions.append(_decision_context(payload))
+                view = _decision_context(payload)
+                proposal = payload.get("proposal")
+                proposal_id = (
+                    proposal.get("proposal_id") if isinstance(proposal, dict) else None
+                )
+                if isinstance(proposal_id, str) and proposal_id in settlements:
+                    view = _with_settlement(view, settlements[proposal_id])
+                decisions.append(view)
             elif event.event_type == FEEDBACK:
                 note = payload.get("feedback")
                 if note is not None:
@@ -740,6 +975,8 @@ def _kernel_time(events: tuple[AuditEvent, ...]) -> datetime:
         moves = event.event_type in (OPENED, MARK)
         if event.event_type == DECISION:
             moves = thaw(event.payload).get("status") == "accepted"
+        if event.event_type == FILL:
+            moves = thaw(event.payload).get("status") == "filled"
         if moves and event.timestamp > latest:
             latest = event.timestamp
     return latest
@@ -753,6 +990,11 @@ def _latest_fill_id(events: tuple[AuditEvent, ...]) -> str:
     """Identity of the latest accepted fill. A restored lot is a new fill."""
     anchor = str(events[0].event_id)
     for event in events:
+        if event.event_type == FILL:
+            payload = thaw(event.payload)
+            if payload.get("status") == "filled":
+                anchor = str(event.event_id)
+            continue
         if event.event_type != DECISION:
             continue
         payload = thaw(event.payload)
@@ -1024,6 +1266,30 @@ def _evidence_context(item: EvidenceItem) -> Json:
     }
 
 
+def _settlements(
+    events: tuple[AuditEvent, ...], as_of: datetime
+) -> dict[str, dict[str, Json]]:
+    found: dict[str, dict[str, Json]] = {}
+    for event in events:
+        if event.timestamp > as_of or event.event_type != FILL:
+            continue
+        payload = thaw(event.payload)
+        proposal_id = payload.get("proposal_id")
+        if isinstance(proposal_id, str):
+            found[proposal_id] = payload
+    return found
+
+
+def _with_settlement(view: Json, settlement: dict[str, Json]) -> Json:
+    if not isinstance(view, dict):
+        return view
+    updated = dict(view)
+    updated["fill"] = settlement.get("fill")
+    status = settlement.get("status")
+    updated["settlement_status"] = status if isinstance(status, str) else None
+    return updated
+
+
 def _decision_context(payload: dict[str, Json]) -> Json:
     proposal = payload.get("proposal")
     thesis = None
@@ -1115,14 +1381,187 @@ def _valuation(
     )
 
 
-def _exact_ratio(numerator: Decimal, denominator: Decimal) -> str | None:
+class _PendingFill:
+    """One accepted trade that does not yet have an execution event."""
+
+    def __init__(
+        self,
+        *,
+        proposal_id: str,
+        symbol: str,
+        action: Literal["buy", "sell"],
+        quantity: int,
+        as_of: datetime,
+    ) -> None:
+        self.proposal_id = proposal_id
+        self.symbol = symbol
+        self.action = action
+        self.quantity = quantity
+        self.as_of = as_of
+
+
+def _pending_executions(
+    events: tuple[AuditEvent, ...], as_of: datetime
+) -> tuple[list[_PendingFill], set[str]]:
+    closed: set[str] = set()
+    used: set[str] = set()
+    for event in events:
+        if event.timestamp > as_of or event.event_type != FILL:
+            continue
+        payload = thaw(event.payload)
+        proposal_id = payload.get("proposal_id")
+        if isinstance(proposal_id, str):
+            closed.add(proposal_id)
+        evidence_id = payload.get("price_evidence_id")
+        if isinstance(evidence_id, str):
+            used.add(evidence_id)
+    pending: list[_PendingFill] = []
+    for event in events:
+        if event.timestamp > as_of or event.event_type != DECISION:
+            continue
+        payload = thaw(event.payload)
+        pending_state = payload.get("fill_state") == "pending"
+        accepted = payload.get("status") == "accepted"
+        if not pending_state or not accepted:
+            continue
+        proposal = payload.get("proposal")
+        if not isinstance(proposal, dict):
+            continue
+        proposal_id = proposal.get("proposal_id")
+        symbol = proposal.get("symbol")
+        action = proposal.get("action")
+        quantity = proposal.get("quantity")
+        recorded = proposal.get("as_of")
+        if (
+            not isinstance(proposal_id, str)
+            or proposal_id in closed
+            or not isinstance(symbol, str)
+            or action not in ("buy", "sell")
+            or not isinstance(quantity, int)
+            or not isinstance(recorded, str)
+        ):
+            continue
+        pending.append(
+            _PendingFill(
+                proposal_id=proposal_id,
+                symbol=symbol,
+                action=cast(Literal["buy", "sell"], action),
+                quantity=quantity,
+                as_of=datetime.fromisoformat(recorded),
+            )
+        )
+    return pending, used
+
+
+def _next_trade_observation(
+    packet: ResearchPacket,
+    mandate: SimulationMandate,
+    *,
+    symbol: str,
+    decision_at: datetime,
+    as_of: datetime,
+    used: set[str],
+) -> tuple[EvidenceItem, str | None] | None:
+    """Earliest unused trade print strictly after the decision."""
+    candidates = [
+        item
+        for item in packet.evidence
+        if item.kind == "observation"
+        and item.price_role == "trade"
+        and item.symbol == symbol
+        and item.price is not None
+        and item.observed_at > decision_at
+        and item.available_at > decision_at
+        and item.observed_at <= as_of
+        and item.available_at <= as_of
+        and item.evidence_id not in used
+    ]
+    if not candidates:
+        return None
+    chosen = sorted(
+        candidates,
+        key=lambda item: (item.observed_at, item.available_at, item.evidence_id),
+    )[0]
+    age = timedelta(hours=mandate.max_evidence_age_hours)
+    observed_age = as_of - chosen.observed_at
+    available_age = as_of - chosen.available_at
+    if observed_age > age or available_age > age:
+        return (
+            chosen,
+            f"stale_evidence: {chosen.evidence_id} is older than the configured age",
+        )
+    return chosen, None
+
+
+def _execution_fill(
+    packet: ResearchPacket,
+    mandate: SimulationMandate,
+    item: _PendingFill,
+    chosen: EvidenceItem,
+) -> Json:
+    return {
+        "assumptions": {
+            "causal_rule": ("observed_at and available_at are both after the decision"),
+            "fee_source": "simulation_mandate.fill_fee",
+            "not_a_market_execution": True,
+            "price_source": "post_decision_trade_observation",
+            "whole_shares_only": True,
+        },
+        "fill_price": chosen.price,
+        "price_evidence_id": chosen.evidence_id,
+        "quantity": item.quantity,
+        "security_id": str(security_for(packet, item.symbol)),
+        "side": item.action,
+        "transaction_costs": mandate.fill_fee,
+    }
+
+
+def _record_unfilled(
+    ledger: SQLiteLedger,
+    *,
+    book_id: UUID,
+    as_of: datetime,
+    item: _PendingFill,
+    reason: str,
+    evidence_id: str,
+    head: str,
+) -> Json:
+    """Close one pending trade without a fill. A later price is not tried."""
+    append_manager_event(
+        ledger,
+        book_id=book_id,
+        event_type=FILL,
+        dedup_key=f"fill:{item.proposal_id}",
+        timestamp=as_of,
+        payload={
+            "fill": None,
+            "price_evidence_id": evidence_id,
+            "proposal_id": item.proposal_id,
+            "reasons": [reason],
+            "status": "rejected",
+        },
+        expected_previous_hash=head,
+    )
+    return {
+        "proposal_id": item.proposal_id,
+        "reasons": [reason],
+        "status": "rejected",
+    }
+
+
+def _return_ratio(numerator: Decimal, denominator: Decimal) -> tuple[str, bool] | None:
+    """Return a documented ratio. Inexact ratios are 12-place half-even."""
     if denominator == 0:
         return None
+    exact = Fraction(numerator) / Fraction(denominator)
     with decimal_context():
         quotient = numerator / denominator
-    if Fraction(quotient) != Fraction(numerator) / Fraction(denominator):
-        return None
-    return format(quotient, "f")
+    if Fraction(quotient) == exact:
+        return format(quotient, "f"), True
+    quantum = Decimal("1").scaleb(-RETURN_RATIO_PLACES)
+    with localcontext(Context(prec=80, rounding=ROUND_HALF_EVEN)):
+        rounded = (Decimal(numerator) / Decimal(denominator)).quantize(quantum)
+    return format(rounded, "f"), False
 
 
 def _benchmark(packet: ResearchPacket, as_of: datetime, nav: str | None) -> Json:
@@ -1145,13 +1584,23 @@ def _benchmark(packet: ResearchPacket, as_of: datetime, nav: str | None) -> Json
         }
     start = start_points[-1]
     end = end_points[-1]
-    series_change = _exact_ratio(
+    if start.series_kind != end.series_kind:
+        return {
+            "portfolio_change": None,
+            "reason": "benchmark points do not share one series kind",
+            "series_kind": end.series_kind,
+            "series_label": _SERIES_LABELS[end.series_kind],
+            "status": "unavailable",
+        }
+    series = _return_ratio(
         parse_money(end.level) - parse_money(start.level), parse_money(start.level)
     )
-    portfolio_change = None
+    portfolio = None
     if nav is not None:
         initial = parse_money(packet.portfolio_context.cash)
-        portfolio_change = _exact_ratio(parse_money(nav) - initial, initial)
+        portfolio = _return_ratio(parse_money(nav) - initial, initial)
+    series_change = None if series is None else series[0]
+    portfolio_change = None if portfolio is None else portfolio[0]
     status = (
         "available"
         if series_change is not None and portfolio_change is not None
@@ -1161,8 +1610,16 @@ def _benchmark(packet: ResearchPacket, as_of: datetime, nav: str | None) -> Json
         "end_level": end.level,
         "limitations": list(end.limitations),
         "portfolio_change": portfolio_change,
-        "reason": "supplied series comparison, not an index calculation or an edge",
+        "portfolio_change_exact": None if portfolio is None else portfolio[1],
+        "ratio_precision": RETURN_RATIO_PRECISION,
+        "reason": (
+            "supplied series comparison at the documented return-ratio "
+            "precision, not an index calculation or an edge"
+        ),
         "series_change": series_change,
+        "series_change_exact": None if series is None else series[1],
+        "series_kind": end.series_kind,
+        "series_label": _SERIES_LABELS[end.series_kind],
         "start_level": start.level,
         "status": status,
     }

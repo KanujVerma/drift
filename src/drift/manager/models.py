@@ -166,11 +166,21 @@ class PortfolioContext(FrozenModel):
 
 
 class BenchmarkPoint(FrozenModel):
-    """One supplied benchmark level. Absence is reported, not filled in."""
+    """One supplied benchmark level. Absence is reported, not filled in.
+
+    ``series_kind`` is a caller label. ``unspecified`` is not treated as
+    S&P 500 total return. ``price_only_substitute`` is a price series, not
+    a total-return index.
+    """
 
     available_at: UTCDateTime
     level: str
     limitations: tuple[NonBlankStr, ...] = Field(min_length=1)
+    series_kind: Literal[
+        "unspecified",
+        "sp500_total_return",
+        "price_only_substitute",
+    ] = "unspecified"
 
     @field_validator("level")
     @classmethod
@@ -192,6 +202,7 @@ class ResearchPacket(FrozenModel):
     portfolio_context: PortfolioContext
     limitations: tuple[NonBlankStr, ...] = Field(min_length=1)
     benchmark: tuple[BenchmarkPoint, ...] = ()
+    settlement_only_dates: tuple[date, ...] = ()
 
     @model_validator(mode="after")
     def require_consistent_packet(self) -> Self:
@@ -241,6 +252,15 @@ class ResearchPacket(FrozenModel):
         if tuple(sorted(times)) != times:
             message = "benchmark points must be in time order"
             raise ValueError(message)
+        session_days = {item.local_date for item in self.sessions}
+        unknown = [
+            day.isoformat()
+            for day in self.settlement_only_dates
+            if day not in session_days
+        ]
+        if unknown:
+            message = f"settlement dates are not sessions: {unknown}"
+            raise ValueError(message)
         return self
 
 
@@ -254,7 +274,10 @@ class SimulationMandate(FrozenModel):
     min_cash_after: str
     max_evidence_age_hours: int = Field(gt=0)
     fill_fee: str
-    fill_price_source: Literal["cited_observation_price"]
+    fill_price_source: Literal[
+        "cited_observation_price",
+        "post_decision_execution",
+    ]
     position_check: Literal["cost_basis_denominator"]
     whole_shares_only: Literal[True]
     acknowledgements: tuple[NonBlankStr, ...] = Field(min_length=1)
@@ -350,10 +373,10 @@ class InvestmentProposal(FrozenModel):
     symbol: NonBlankStr
     quantity: int = Field(ge=0)
     thesis: NonBlankStr
-    evidence_ids: tuple[NonBlankStr, ...] = Field(min_length=1)
+    evidence_ids: tuple[NonBlankStr, ...] = ()
     uncertainty: NonBlankStr
     allocation_reasoning: NonBlankStr
-    exit_conditions: tuple[ExitCondition, ...] = Field(min_length=1)
+    exit_conditions: tuple[ExitCondition, ...] = ()
     execution: Literal["simulation", "live"]
     inference: Literal["scripted", "native_supervised"]
     model_identity: str | None = None
@@ -382,6 +405,13 @@ class InvestmentProposal(FrozenModel):
             raise ValueError(message)
         if self.action != "hold" and self.quantity <= 0:
             message = "a buy or sell proposal requires a positive whole-share quantity"
+            raise ValueError(message)
+        abstaining = self.action == "hold" and not self.evidence_ids
+        if self.action != "hold" and not self.evidence_ids:
+            message = "a buy or sell proposal requires cited evidence"
+            raise ValueError(message)
+        if not abstaining and not self.exit_conditions:
+            message = "a trade or a cited hold requires an exit condition"
             raise ValueError(message)
         if self.inference == "scripted" and self.model_identity is not None:
             message = "a scripted proposal cannot claim a model identity"
