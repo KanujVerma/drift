@@ -232,6 +232,169 @@ def _rows(value: object) -> list[dict[str, object]]:
     return [_mapping(item) for item in value]
 
 
+def test_report_shows_return_exposure_and_observed_drawdown(tmp_path: Path) -> None:
+    manager, path = _open(tmp_path)
+    assert _mapping(manager.propose(_proposal()))["status"] == "accepted"
+    unmarked = _mapping(manager.report(BUY_AT))
+    assert unmarked["portfolio_return"] is None
+    assert unmarked["exposure"] is None
+    assert _mapping(manager.mark(MARK_AT))["status"] == "marked"
+    assert _mapping(manager.mark(TUESDAY_AT))["status"] == "marked"
+    report = _mapping(PortfolioManager.recover(path).report(TUESDAY_AT))
+    assert report["portfolio_return"] == "0.0099"
+    assert report["exposure"] == "0.108921675413"
+    drawdown = _mapping(report["observed_drawdown"])
+    assert drawdown["maximum"] == "0.0001"
+    assert drawdown["valuation_samples"] == 3
+
+
+def test_report_ignores_caller_decimal_precision(tmp_path: Path) -> None:
+    from decimal import Context, localcontext
+
+    manager, _ = _open(tmp_path)
+    manager.propose(_proposal())
+    manager.mark(MARK_AT)
+    manager.mark(TUESDAY_AT)
+    with localcontext(Context(prec=1)):
+        report = _mapping(manager.report(TUESDAY_AT))
+    assert report["portfolio_return"] == "0.0099"
+    assert _mapping(report["observed_drawdown"])["maximum"] == "0.0001"
+
+
+def test_benchmark_comparison_ignores_caller_decimal_precision(tmp_path: Path) -> None:
+    from decimal import Context, localcontext
+
+    packet = _packet(benchmark=True)
+    second = packet.benchmark[1].model_copy(update={"level": "199"})
+    packet = packet.model_copy(update={"benchmark": (packet.benchmark[0], second)})
+    manager, _ = PortfolioManager.open(tmp_path / "book.sqlite", packet, _mandate())
+    with localcontext(Context(prec=1)):
+        report = _mapping(manager.report(MARK_AT))
+    assert _mapping(report["benchmark_relative"])["series_change"] == "0.99"
+
+
+def test_total_return_comparison_discloses_uncredited_portfolio_dividends(
+    tmp_path: Path,
+) -> None:
+    packet = _packet(benchmark=True)
+    points = tuple(
+        p.model_copy(update={"series_kind": "sp500_total_return"})
+        for p in packet.benchmark
+    )
+    packet = packet.model_copy(update={"benchmark": points})
+    manager, _ = PortfolioManager.open(tmp_path / "book.sqlite", packet, _mandate())
+    comparison = _mapping(_mapping(manager.report(MARK_AT))["benchmark_relative"])
+    limitations = comparison["limitations"]
+    assert isinstance(limitations, list)
+    assert any("dividends are not credited" in item for item in limitations)
+
+
+def test_report_compares_price_return_from_opening_session_without_dividends(
+    tmp_path: Path,
+) -> None:
+    packet = _packet()
+    spy = Instrument(
+        symbol="SPY",
+        security_id=deterministic_memory_uuid7("benchmark-spy"),
+        name="SPY",
+    )
+    start = _evidence(
+        "spy-open",
+        "observation",
+        "SPY",
+        OPEN,
+        "SPY opening price",
+        price="100",
+        price_role="trade",
+    )
+    end = _evidence(
+        "spy-close",
+        "observation",
+        "SPY",
+        MARK_AT,
+        "SPY closing price",
+        price="110",
+        price_role="close",
+    )
+    packet = packet.model_copy(
+        update={
+            "instruments": (*packet.instruments, spy),
+            "evidence": (*packet.evidence, start, end),
+        }
+    )
+    manager, _ = PortfolioManager.open(tmp_path / "book.sqlite", packet, _mandate())
+    manager.propose(_proposal())
+    manager.mark(MARK_AT)
+    report = _mapping(manager.report(MARK_AT))
+    comparison = _mapping(report["price_return_benchmark"])
+    assert comparison["status"] == "available"
+    assert comparison["series_change"] == "0.1"
+    assert comparison["portfolio_change"] == "-0.0001"
+    assert comparison["series_kind"] == "price_only_substitute"
+    changed_end = end.model_copy(update={"source_label": "another-feed"})
+    changed_packet = packet.model_copy(
+        update={"evidence": (*packet.evidence[:-1], changed_end)}
+    )
+    other, _ = PortfolioManager.open(
+        tmp_path / "different-feed.sqlite", changed_packet, _mandate()
+    )
+    other.propose(_proposal())
+    other.mark(MARK_AT)
+    mismatch = _mapping(_mapping(other.report(MARK_AT))["price_return_benchmark"])
+    assert mismatch["status"] == "unavailable"
+
+
+def test_price_benchmark_does_not_compare_across_spy_split(tmp_path: Path) -> None:
+    packet = _packet()
+    spy = Instrument(
+        symbol="SPY",
+        security_id=deterministic_memory_uuid7("benchmark-spy"),
+        name="SPY",
+    )
+    start = _evidence(
+        "spy-open",
+        "observation",
+        "SPY",
+        OPEN,
+        "SPY opening price",
+        price="100",
+        price_role="trade",
+    )
+    end = _evidence(
+        "spy-close",
+        "observation",
+        "SPY",
+        TUESDAY_AT,
+        "SPY closing price",
+        price="50",
+        price_role="close",
+    )
+    split = EvidenceItem(
+        evidence_id="alpaca:split:SPY:2026-01-06",
+        kind="news",
+        symbol="SPY",
+        observed_at=TUESDAY_AT,
+        available_at=TUESDAY_AT,
+        limitations=("fixture",),
+        summary="forward_split SPY ex_date 2026-01-06",
+        source_label="alpaca-corporate-action",
+    )
+    packet = packet.model_copy(
+        update={
+            "instruments": (*packet.instruments, spy),
+            "evidence": (*packet.evidence, start, end, split),
+        }
+    )
+    manager, _ = PortfolioManager.open(tmp_path / "book.sqlite", packet, _mandate())
+    manager.propose(_proposal())
+    manager.mark(MARK_AT)
+    manager.mark(TUESDAY_AT)
+    comparison = _mapping(
+        _mapping(manager.report(TUESDAY_AT))["price_return_benchmark"]
+    )
+    assert comparison["status"] == "unavailable"
+
+
 def test_buy_mark_hold_then_review_uses_the_recorded_outcome(tmp_path: Path) -> None:
     manager, path = _open(tmp_path)
     bought = _mapping(manager.propose(_proposal()))

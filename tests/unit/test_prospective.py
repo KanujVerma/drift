@@ -56,6 +56,7 @@ def _collection() -> Collection:
         benchmark_kind="sp500_total_return",
         benchmark_limitation="fixture total-return level, not an official calculation",
         benchmark_fetched_at=WHEN,
+        corporate_actions_received_at=WHEN,
         gaps=(
             "X posts are not collected; no authorized X API credential is configured",
         ),
@@ -132,8 +133,7 @@ def test_packet_labels_total_return_and_records_the_x_gap() -> None:
     assert packet.benchmark[0].series_kind == "sp500_total_return"
     assert packet.evidence[0].price_role == "close"
     assert any("not an observation session" in item for item in packet.limitations)
-    opens = [item for item in packet.evidence if item.price_role == "trade"]
-    assert opens[0].price == "270.1"
+    assert not any(item.price_role == "trade" for item in packet.evidence)
 
 
 def test_significant_filings_are_reported_once(tmp_path: Path) -> None:
@@ -211,35 +211,30 @@ def test_intraday_collection_does_not_admit_a_close() -> None:
         benchmark_fetched_at=collected,
         bars=(Bar("AAPL", bar_time, "100", "101"),),
     )
-    packet = build_packet(collection, readiness=False)
-    roles = {item.price_role for item in packet.evidence}
-    assert "trade" in roles
-    assert "close" not in roles
-    assert packet.benchmark[0].available_at == collected
+    assert not any(item.price is not None for item in new_items(set(), collection))
 
 
-def test_settlement_tail_can_fill_without_a_new_decision(tmp_path: Path) -> None:
+def test_settlement_tail_blocks_unverified_fills_and_new_decisions(
+    tmp_path: Path,
+) -> None:
     moment = datetime(2026, 12, 28, 16, 0, tzinfo=UTC)
     assert in_settlement_window(moment) is True
     assert observation_date(moment) is None
     collection = replace(_collection(), collected_at=moment)
-    result = perform_daily(
-        tmp_path, "observation", moment, collection, {"terra": tmp_path}
-    )
-    assert result["status"] == "ready"
-    assert result["counts_toward_observation"] is False
-    proposals = result["proposals"]
-    assert isinstance(proposals, dict)
-    assert proposals["terra"] == "not_a_decision_session"
+    with pytest.raises(ValueError, match="before collecting"):
+        perform_daily(tmp_path, "observation", moment, collection, {"terra": tmp_path})
 
 
-def test_second_daily_applies_the_existing_receipt_before_replacing_it(
+def test_second_daily_records_receipt_and_rejects_late_submission(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = datetime(2026, 11, 27, 18, 10, tzinfo=UTC)
-    bar = Bar("AAPL", datetime(2026, 11, 27, 14, 30, tzinfo=UTC), "100", "101")
+    bar = Bar("AAPL", datetime(2026, 11, 27, 14, 30, tzinfo=UTC), "100", "101", first)
     initial = replace(_collection(), collected_at=first, bars=(bar,))
-    assert perform_daily(tmp_path, "observation", first, initial)["status"] == "ready"
+    assert (
+        perform_daily(tmp_path, "observation", first, initial)["status"] == "processed"
+    )
     receipt_path = tmp_path / "observation" / "terra" / "receipt.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     proposal = tmp_path / "terra.json"
@@ -265,23 +260,26 @@ def test_second_daily_applies_the_existing_receipt_before_replacing_it(
         encoding="utf-8",
     )
     second = first + timedelta(minutes=5)
-    applied = perform_daily(
-        tmp_path,
-        "observation",
-        second,
-        replace(initial, collected_at=second),
-        {"terra": proposal},
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            del tz
+            return second
+
+    monkeypatch.setattr("drift.prospective.run.datetime", Clock)
+    applied = apply_proposal(tmp_path, "observation", "terra", proposal)
+    assert isinstance(applied, dict) and applied["status"] == "accepted"
+    perform_daily(
+        tmp_path, "observation", second, replace(initial, collected_at=second)
     )
-    applied_proposals = applied["proposals"]
-    assert isinstance(applied_proposals, dict)
-    recorded = applied_proposals["terra"]
-    assert isinstance(recorded, dict)
-    assert recorded["status"] == "accepted"
     renewed = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert renewed["as_of"] != receipt["as_of"]
+    assert renewed == receipt
 
     late_root = tmp_path / "late"
-    assert perform_daily(late_root, "observation", first, initial)["status"] == "ready"
+    assert (
+        perform_daily(late_root, "observation", first, initial)["status"] == "processed"
+    )
     late_receipt = json.loads(
         (late_root / "observation" / "terra" / "receipt.json").read_text(
             encoding="utf-8"
@@ -295,16 +293,16 @@ def test_second_daily_applies_the_existing_receipt_before_replacing_it(
         encoding="utf-8",
     )
     monday = datetime(2026, 11, 30, 16, 0, tzinfo=UTC)
-    late = perform_daily(
-        late_root,
-        "observation",
-        monday,
-        replace(initial, collected_at=monday, bars=(bar,)),
-        {"terra": late_proposal},
-    )
-    late_proposals = late["proposals"]
-    assert isinstance(late_proposals, dict)
-    assert late_proposals["terra"] == "late_submission"
+
+    class LateClock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            del tz
+            return monday
+
+    monkeypatch.setattr("drift.prospective.run.datetime", LateClock)
+    with pytest.raises(ValueError, match="outside the review session"):
+        apply_proposal(late_root, "observation", "terra", late_proposal)
 
 
 def test_default_collect_does_not_pin_the_command_start(
@@ -405,8 +403,6 @@ def test_unstamped_bar_does_not_claim_the_close() -> None:
         benchmark_fetched_at=published,
         bars=(bar,),
     )
-    packet = build_packet(collection, readiness=False)
-    assert all(item.price_role != "close" for item in packet.evidence)
     ingested = new_items(set(), collection)
     assert all(item.price_role != "close" for item in ingested)
     assert all(item.evidence_id != "yahoo:AAPL:close:2026-11-27" for item in ingested)
@@ -422,13 +418,10 @@ def test_pre_close_fetch_does_not_claim_the_closing_price() -> None:
         "101",
         fetched_at=fetched,
     )
-    packet = build_packet(
-        replace(
-            _collection(),
-            collected_at=published,
-            benchmark_fetched_at=published,
-            bars=(bar,),
-        ),
-        readiness=False,
+    collected = replace(
+        _collection(),
+        collected_at=published,
+        benchmark_fetched_at=published,
+        bars=(bar,),
     )
-    assert all(item.price_role != "close" for item in packet.evidence)
+    assert all(item.price_role != "close" for item in new_items(set(), collected))

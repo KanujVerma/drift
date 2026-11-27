@@ -4,14 +4,17 @@ Reasoning stays in the proposal. This module does not call a model, a
 broker, or a market-data provider.
 """
 
+from __future__ import annotations
+
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from fractions import Fraction
+from functools import wraps
 from pathlib import Path
-from typing import Literal, cast
+from typing import Concatenate, Literal, cast
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -28,6 +31,8 @@ from drift.manager.book import (
     INGEST,
     MARK,
     OPENED,
+    PROSPECTIVE_CA_STATUS,
+    PROSPECTIVE_EXPIRED,
     REFLECTION,
     advance_dates,
     append_manager_event,
@@ -46,6 +51,7 @@ from drift.manager.book import (
     take_snapshot,
     thaw,
 )
+from drift.manager.corporate_actions import split_date
 from drift.manager.decide import (
     Decision,
     RecordedOutcome,
@@ -54,6 +60,8 @@ from drift.manager.decide import (
     fill_limit_reasons,
 )
 from drift.manager.models import (
+    PROSPECTIVE_READINESS,
+    PROSPECTIVE_SEAL_REQUIRED,
     EvidenceItem,
     FeedbackNote,
     IngestBatch,
@@ -101,6 +109,32 @@ class ManagerError(DriftError):
     """The cycle refused to open or replay a book."""
 
 
+def _pilot_book(mandate: SimulationMandate) -> bool:
+    return any(
+        item in mandate.acknowledgements
+        for item in (PROSPECTIVE_SEAL_REQUIRED, PROSPECTIVE_READINESS)
+    )
+
+
+def _serialize_pilot_book[**P, R](
+    method: Callable[Concatenate[PortfolioManager, P], R],
+) -> Callable[Concatenate[PortfolioManager, P], R]:
+    @wraps(method)
+    def wrapped(self: PortfolioManager, *args: P.args, **kwargs: P.kwargs) -> R:
+        path = self._ledger.path.resolve()
+        if path.name in {"terra.sqlite", "sol.sqlite"} and path.parent.name in {
+            "observation",
+            "readiness",
+        }:
+            from drift.prospective.locking import pilot_lock
+
+            with pilot_lock(path.parent.parent):
+                return method(self, *args, **kwargs)
+        return method(self, *args, **kwargs)
+
+    return cast("Callable[Concatenate[PortfolioManager, P], R]", wrapped)
+
+
 class PortfolioManager:
     """One local simulation book stored in the retained SQLite ledger."""
 
@@ -112,6 +146,22 @@ class PortfolioManager:
         cls, path: Path, packet: ResearchPacket, mandate: SimulationMandate
     ) -> tuple[PortfolioManager, Json]:
         """Create a book or reopen the same packet and mandate."""
+        resolved = path.resolve()
+        if (
+            _pilot_book(mandate)
+            and resolved.name in {"terra.sqlite", "sol.sqlite"}
+            and resolved.parent.name in {"observation", "readiness"}
+        ):
+            from drift.prospective.locking import pilot_lock
+
+            with pilot_lock(resolved.parent.parent):
+                return cls._open_locked(path, packet, mandate)
+        return cls._open_locked(path, packet, mandate)
+
+    @classmethod
+    def _open_locked(
+        cls, path: Path, packet: ResearchPacket, mandate: SimulationMandate
+    ) -> tuple[PortfolioManager, Json]:
         _require_mandate_alignment(packet, mandate)
         if path.exists():
             return cls._reopen(path, packet, mandate)
@@ -154,7 +204,10 @@ class PortfolioManager:
             raise ManagerError(str(error)) from error
         return cls(ledger)
 
-    def propose(self, proposal: InvestmentProposal) -> Json:
+    @_serialize_pilot_book
+    def propose(
+        self, proposal: InvestmentProposal, *, enforce_event_time: bool = False
+    ) -> Json:
         """Validate one proposal and simulate it only when it is eligible."""
         events = self._ledger.verified_events()
         packet, mandate, _packet_hash, _mandate_hash, book_id, kernel = replay(events)
@@ -163,6 +216,32 @@ class PortfolioManager:
         existing = _find(events, dedup)
         if existing is not None:
             return _duplicate_view(events, existing, proposal)
+        if _pilot_book(mandate) and not _pilot_invalidations_agree(
+            self._ledger, proposal.as_of
+        ):
+            return _result(
+                status="rejected",
+                reasons=("shared_input_inconsistent",),
+                proposal_id=str(proposal.proposal_id),
+                snapshot=None,
+                fill=None,
+                inference=proposal.inference,
+                model_identity=proposal.model_identity,
+            )
+        if enforce_event_time and proposal.as_of < max(
+            event.timestamp for event in events
+        ):
+            return _result(
+                status="rejected",
+                reasons=(
+                    "decision_before_recorded_state: as_of is before a ledger event",
+                ),
+                proposal_id=str(proposal.proposal_id),
+                snapshot=_book_at(events, proposal.as_of),
+                fill=None,
+                inference=proposal.inference,
+                model_identity=proposal.model_identity,
+            )
         clock = _kernel_time(events)
         if proposal.as_of < clock:
             return _result(
@@ -317,7 +396,10 @@ class PortfolioManager:
             model_identity=proposal.model_identity,
         )
 
-    def execute_pending(self, as_of: datetime) -> Json:
+    @_serialize_pilot_book
+    def execute_pending(
+        self, as_of: datetime, *, execution_after: Mapping[str, datetime] | None = None
+    ) -> Json:
         """Fill accepted trades from a later trade observation, once each.
 
         A cited-price book is refused. Missing, stale, future, and
@@ -335,6 +417,60 @@ class PortfolioManager:
                 ],
                 "status": "rejected",
             }
+        if _pilot_book(mandate):
+            if not _pilot_coverage_available(self._ledger, as_of, reject_future=True):
+                return {
+                    "results": [],
+                    "reasons": [
+                        "corporate action coverage is unavailable or inconsistent"
+                    ],
+                    "status": "corporate_actions_unavailable",
+                }
+            if not _pilot_invalidations_agree(self._ledger, as_of):
+                return {
+                    "results": [],
+                    "reasons": ["books disagree on trade invalidations"],
+                    "status": "shared_input_inconsistent",
+                }
+        if PROSPECTIVE_SEAL_REQUIRED in mandate.acknowledgements:
+            from drift.prospective.run import (
+                _execution_barriers,
+                _has_untrusted_decisions,
+            )
+
+            barriers = _execution_barriers(self._ledger, as_of)
+            if _has_untrusted_decisions(events, barriers):
+                return {
+                    "results": [],
+                    "reasons": ["pilot decision has no verified execution seal"],
+                    "status": "untrusted_decision_time",
+                }
+            execution_after = (
+                barriers
+                if execution_after is None
+                else {
+                    identifier: max(when, execution_after[identifier])
+                    for identifier, when in barriers.items()
+                    if identifier in execution_after
+                }
+            )
+        if _pilot_book(mandate):
+            affected = _unadjusted_split_holdings(packet, events, kernel, as_of)
+            if affected:
+                return {
+                    "results": [],
+                    "reasons": [
+                        "unadjusted split affects holdings: "
+                        + ", ".join(sorted(affected))
+                    ],
+                    "status": "unadjusted_split",
+                }
+            if _invalidated_executions(packet, events, as_of):
+                return {
+                    "results": [],
+                    "reasons": ["an executed trade was later invalidated"],
+                    "status": "invalidated_execution",
+                }
         clock = _kernel_time(events)
         if as_of < clock:
             return {
@@ -357,6 +493,13 @@ class PortfolioManager:
                 "status": "rejected",
             }
         pending, used = _pending_executions(events, as_of)
+        if PROSPECTIVE_SEAL_REQUIRED in mandate.acknowledgements:
+            from drift.prospective.run import _expired_review_ids
+
+            expired = _expired_review_ids(
+                tuple(event for event in events if event.timestamp <= as_of)
+            )
+            pending = [item for item in pending if item.proposal_id not in expired]
         if not pending:
             return {"results": [], "reasons": [], "status": "idle"}
         results: list[Json] = []
@@ -364,11 +507,37 @@ class PortfolioManager:
         advanced = False
         advances = advance_dates(packet, current, target)
         for item in pending:
+            if _pilot_book(mandate) and any(
+                item.as_of.date() < day <= as_of.date()
+                for day in _split_dates(packet, as_of).get(item.symbol, ())
+            ):
+                results.append(
+                    {
+                        "proposal_id": item.proposal_id,
+                        "reasons": ["unadjusted split occurred after the decision"],
+                        "status": "pending",
+                    }
+                )
+                continue
+            if execution_after is not None and item.proposal_id not in execution_after:
+                results.append(
+                    {
+                        "proposal_id": item.proposal_id,
+                        "reasons": [
+                            "unverified_decision: no trusted execution boundary"
+                        ],
+                        "status": "pending",
+                    }
+                )
+                continue
+            boundary = item.as_of
+            if execution_after is not None:
+                boundary = max(boundary, execution_after[item.proposal_id])
             found = _next_trade_observation(
                 packet,
                 mandate,
                 symbol=item.symbol,
-                decision_at=item.as_of,
+                decision_at=boundary,
                 as_of=as_of,
                 used=used,
             )
@@ -385,6 +554,22 @@ class PortfolioManager:
                 )
                 continue
             chosen, refusal = found
+            if _pilot_book(mandate) and not _pilot_coverage_available(
+                self._ledger,
+                as_of,
+                reject_future=True,
+                required_at=chosen.available_at,
+            ):
+                results.append(
+                    {
+                        "proposal_id": item.proposal_id,
+                        "reasons": [
+                            "corporate action coverage predates the trade observation"
+                        ],
+                        "status": "pending",
+                    }
+                )
+                continue
             if refusal is not None:
                 results.append(
                     _record_unfilled(
@@ -486,11 +671,55 @@ class PortfolioManager:
             "status": status,
         }
 
+    @_serialize_pilot_book
     def mark(self, as_of: datetime) -> Json:
         """Mark held names at cited close observations. Partial marks are refused."""
         events = self._ledger.verified_events()
         packet, mandate, _ph, _mh, book_id, kernel = replay(events)
+        opening_packet = packet
         packet = packet_through(events, until=as_of)
+        if _pilot_book(mandate):
+            if not _pilot_coverage_available(self._ledger, as_of, reject_future=True):
+                return _result(
+                    status="rejected",
+                    reasons=("corporate_actions_unavailable",),
+                    proposal_id=None,
+                    snapshot=None,
+                    fill=None,
+                    inference=None,
+                    model_identity=None,
+                )
+            if not _pilot_invalidations_agree(self._ledger, as_of):
+                return _result(
+                    status="rejected",
+                    reasons=("shared_input_inconsistent",),
+                    proposal_id=None,
+                    snapshot=None,
+                    fill=None,
+                    inference=None,
+                    model_identity=None,
+                )
+            affected = _unadjusted_split_holdings(packet, events, kernel, as_of)
+            if affected:
+                return _result(
+                    status="rejected",
+                    reasons=(f"unadjusted_split: {', '.join(sorted(affected))}",),
+                    proposal_id=None,
+                    snapshot=None,
+                    fill=None,
+                    inference=None,
+                    model_identity=None,
+                )
+            if _invalidated_executions(packet, events, as_of):
+                return _result(
+                    status="rejected",
+                    reasons=("invalidated_execution",),
+                    proposal_id=None,
+                    snapshot=None,
+                    fill=None,
+                    inference=None,
+                    model_identity=None,
+                )
         clock = _kernel_time(events)
         target = session_for(packet, as_of)
         current = kernel.state.session_key.local_date
@@ -531,9 +760,20 @@ class PortfolioManager:
                 as_of=as_of,
                 session_open=session_open,
                 session_close=session_close,
+                opening_packet=opening_packet,
             )
             if isinstance(chosen, str):
                 reasons.append(chosen)
+                continue
+            if _pilot_book(mandate) and not _pilot_coverage_available(
+                self._ledger,
+                as_of,
+                reject_future=True,
+                required_at=chosen.available_at,
+            ):
+                reasons.append(
+                    "corporate_actions_unavailable: coverage predates the close"
+                )
                 continue
             prices.append(
                 {
@@ -598,12 +838,24 @@ class PortfolioManager:
     def context(self, as_of: datetime) -> Json:
         """Point-in-time inputs, decisions, and outcomes for a later review."""
         events = self._ledger.verified_events()
-        packet, _mandate, *_rest, kernel = replay(events, until=as_of)
+        packet, mandate, *_rest, kernel = replay(events, until=as_of)
         packet = packet_through(events, until=as_of)
         decisions: list[Json] = []
         feedback: list[Json] = []
         reflections: list[Json] = []
         settlements = _settlements(events, as_of)
+        invalidated_proposals = (
+            _invalidated_execution_proposals(packet, events, as_of)
+            if _pilot_book(mandate)
+            else set()
+        )
+        expired: set[str] = set()
+        if PROSPECTIVE_SEAL_REQUIRED in mandate.acknowledgements:
+            from drift.prospective.run import _expired_review_ids
+
+            expired = _expired_review_ids(
+                tuple(event for event in events if event.timestamp <= as_of)
+            )
         for event in events:
             if event.timestamp > as_of:
                 continue
@@ -616,6 +868,23 @@ class PortfolioManager:
                 )
                 if isinstance(proposal_id, str) and proposal_id in settlements:
                     view = _with_settlement(view, settlements[proposal_id])
+                if (
+                    isinstance(proposal_id, str)
+                    and proposal_id in expired
+                    and isinstance(view, dict)
+                ):
+                    view = {**view, "status": "expired", "settlement_status": "expired"}
+                if (
+                    isinstance(proposal_id, str)
+                    and proposal_id in invalidated_proposals
+                    and isinstance(view, dict)
+                ):
+                    view = {
+                        **view,
+                        "status": "invalidated",
+                        "settlement_status": "invalidated",
+                        "fill": None,
+                    }
                 decisions.append(view)
             elif event.event_type == FEEDBACK:
                 note = payload.get("feedback")
@@ -626,12 +895,71 @@ class PortfolioManager:
                 if note is not None:
                     reflections.append(note)
         evidence: list[Json] = []
+        invalidated_prices = (
+            _invalidated_trade_ids(packet, as_of) if _pilot_book(mandate) else set()
+        )
+        from drift.prospective.trade_identity import normalize_trade_id
+
         for item in packet.evidence:
-            if item.available_at <= as_of:
+            if (
+                item.available_at <= as_of
+                and normalize_trade_id(item.evidence_id) not in invalidated_prices
+            ):
                 evidence.append(_evidence_context(item))
+        book = _public_book(kernel, packet, as_of)
+        if _pilot_book(mandate):
+            affected = _unadjusted_split_holdings(packet, events, kernel, as_of)
+            coverage_missing = not _pilot_coverage_available(self._ledger, as_of)
+            if coverage_missing and kernel.state.holdings and isinstance(book, dict):
+                book.update(
+                    {
+                        "marked": False,
+                        "holdings_market_value": None,
+                        "net_asset_value": None,
+                        "valuation": "unavailable",
+                        "valuation_reason": (
+                            "corporate action coverage is unavailable or inconsistent"
+                        ),
+                    }
+                )
+            if affected and isinstance(book, dict):
+                book.update(
+                    {
+                        "marked": False,
+                        "holdings_market_value": None,
+                        "net_asset_value": None,
+                        "valuation": "unavailable",
+                        "valuation_reason": "unadjusted split affects "
+                        + ", ".join(sorted(affected)),
+                    }
+                )
+            if _invalidated_executions(packet, events, as_of) and isinstance(
+                book, dict
+            ):
+                book.update(
+                    {
+                        "marked": False,
+                        "holdings_market_value": None,
+                        "net_asset_value": None,
+                        "valuation": "unavailable",
+                        "valuation_reason": "an executed trade was later invalidated",
+                    }
+                )
+            if not _pilot_invalidations_agree(self._ledger, as_of) and isinstance(
+                book, dict
+            ):
+                book.update(
+                    {
+                        "marked": False,
+                        "holdings_market_value": None,
+                        "net_asset_value": None,
+                        "valuation": "unavailable",
+                        "valuation_reason": "books disagree on trade invalidations",
+                    }
+                )
         body: dict[str, Json] = {
             "as_of": as_of.isoformat(),
-            "book": _public_book(kernel, packet, as_of),
+            "book": book,
             "decisions": decisions,
             "evidence": evidence,
             "feedback": feedback,
@@ -644,9 +972,33 @@ class PortfolioManager:
     def report(self, as_of: datetime) -> Json:
         """Performance, risk inputs, benchmark, and system costs, kept apart."""
         events = self._ledger.verified_events()
-        packet, _mandate, *_rest, kernel = replay(events, until=as_of)
+        packet, mandate, *_rest, kernel = replay(events, until=as_of)
         packet = packet_through(events, until=as_of)
         valuation, market, unrealized, nav, valuation_reason = _valuation(kernel)
+        if _pilot_book(mandate):
+            if kernel.state.holdings and not _pilot_coverage_available(
+                self._ledger, as_of
+            ):
+                valuation = "unavailable"
+                market = unrealized = nav = None
+                valuation_reason = (
+                    "corporate action coverage is unavailable or inconsistent"
+                )
+            affected = _unadjusted_split_holdings(packet, events, kernel, as_of)
+            if affected:
+                valuation = "unavailable"
+                market = unrealized = nav = None
+                valuation_reason = "unadjusted split affects " + ", ".join(
+                    sorted(affected)
+                )
+            if _invalidated_executions(packet, events, as_of):
+                valuation = "unavailable"
+                market = unrealized = nav = None
+                valuation_reason = "an executed trade was later invalidated"
+            if not _pilot_invalidations_agree(self._ledger, as_of):
+                valuation = "unavailable"
+                market = unrealized = nav = None
+                valuation_reason = "books disagree on trade invalidations"
         if session_for(packet, as_of) != kernel.state.session_key.local_date:
             valuation = "unavailable"
             market = None
@@ -667,6 +1019,21 @@ class PortfolioManager:
             "lane": "exploratory",
             "limitations": list(REPORT_LIMITATIONS),
             "net_asset_value": nav,
+            "portfolio_return": _portfolio_return(packet, nav),
+            "exposure": _exposure(market, nav),
+            "ratio_precision": RETURN_RATIO_PRECISION,
+            "observed_drawdown": (
+                {
+                    "maximum": None,
+                    "valuation_samples": None,
+                    "limitation": valuation_reason,
+                }
+                if nav is None and _pilot_book(mandate)
+                else _observed_drawdown(events, packet, as_of)
+            ),
+            "price_return_benchmark": _price_benchmark(
+                packet, events, as_of, nav, kernel.state.session_key.local_date
+            ),
             "not_a_broker_connection": True,
             "not_promotion_evidence": True,
             "positions": _position_rows(kernel, packet),
@@ -680,6 +1047,7 @@ class PortfolioManager:
         }
         return body
 
+    @_serialize_pilot_book
     def reflect(self, request: ReflectionRequest) -> Json:
         """Record an evidence-based reflection. It does not trade or retune."""
         events = self._ledger.verified_events()
@@ -708,6 +1076,18 @@ class PortfolioManager:
             canonical_json(proposal_data).decode("utf-8")
         )
         observation = _item(packet, request.observation_evidence_id)
+        if _pilot_book(mandate):
+            from drift.prospective.trade_identity import normalize_trade_id
+
+            if not _pilot_invalidations_agree(self._ledger, request.as_of):
+                return _note_result("rejected", ("shared_input_inconsistent",))
+            identity = normalize_trade_id(request.observation_evidence_id)
+            if identity in _invalidated_trade_ids(packet, request.as_of):
+                return _note_result("rejected", ("invalidated_evidence",))
+            if str(request.proposal_id) in _invalidated_execution_proposals(
+                packet, events, request.as_of
+            ):
+                return _note_result("rejected", ("invalidated_decision",))
         refusal = _observation_refusal(observation, proposal, mandate, request.as_of)
         if refusal is not None:
             return _note_result("rejected", (refusal,))
@@ -753,6 +1133,7 @@ class PortfolioManager:
             raise LedgerIntegrityError(message)
         return reflection
 
+    @_serialize_pilot_book
     def feedback(self, note: FeedbackNote) -> Json:
         """Store supervising-user feedback without changing the book."""
         events = self._ledger.verified_events()
@@ -795,6 +1176,7 @@ class PortfolioManager:
             raise LedgerIntegrityError(message)
         return body
 
+    @_serialize_pilot_book
     def ingest(self, batch: IngestBatch) -> Json:
         """Append inputs that stay invisible before their availability time."""
         events = self._ledger.verified_events()
@@ -1105,6 +1487,19 @@ def _outcomes(
     events: tuple[AuditEvent, ...], as_of: datetime
 ) -> dict[str, RecordedOutcome]:
     found: dict[str, RecordedOutcome] = {}
+    expired: set[str] = set()
+    if any(
+        event.event_type == PROSPECTIVE_EXPIRED and event.timestamp <= as_of
+        for event in events
+    ):
+        from drift.prospective.run import _expired_review_ids
+
+        expired = _expired_review_ids(
+            tuple(event for event in events if event.timestamp <= as_of)
+        )
+    invalidated_proposals = _invalidated_execution_proposals(
+        packet_through(events, until=as_of), events, as_of
+    )
     for event in events:
         if event.event_type != DECISION or event.timestamp > as_of:
             continue
@@ -1112,6 +1507,8 @@ def _outcomes(
         outcome_id = payload.get("outcome_id")
         proposal_data = payload.get("proposal")
         if not isinstance(outcome_id, str) or not isinstance(proposal_data, dict):
+            continue
+        if proposal_data.get("proposal_id") in expired | invalidated_proposals:
             continue
         symbol = proposal_data.get("symbol")
         recorded_as_of = proposal_data.get("as_of")
@@ -1184,6 +1581,27 @@ def _session_bounds(packet: ResearchPacket, day: date) -> tuple[datetime, dateti
     raise ManagerError(message)
 
 
+def _valid_pilot_close(
+    item: EvidenceItem, symbol: str, opening_packet: ResearchPacket | None
+) -> bool:
+    from drift.prospective.config import NY, session_close_utc
+
+    labels = {
+        row.source_label
+        for row in (opening_packet.evidence if opening_packet else ())
+        if row.price_role == "close"
+        and row.source_label in {"alpaca-bars-v2-iex-raw", "alpaca-bars-v2-sip-raw"}
+    }
+    day = item.observed_at.astimezone(NY).date()
+    return (
+        len(labels) == 1
+        and item.source_label in labels
+        and item.observed_at == session_close_utc(day)
+        and item.available_at >= item.observed_at
+        and item.evidence_id == f"{item.source_label}:{symbol}:close:{day.isoformat()}"
+    )
+
+
 def _close_observation(
     packet: ResearchPacket,
     mandate: SimulationMandate,
@@ -1192,6 +1610,7 @@ def _close_observation(
     as_of: datetime,
     session_open: datetime,
     session_close: datetime,
+    opening_packet: ResearchPacket | None = None,
 ) -> EvidenceItem | str:
     from datetime import timedelta
 
@@ -1204,6 +1623,9 @@ def _close_observation(
         and item.price is not None
         and session_open <= item.observed_at <= session_close
         and item.available_at <= as_of
+        and (
+            not _pilot_book(mandate) or _valid_pilot_close(item, symbol, opening_packet)
+        )
     ]
     fresh = [
         item
@@ -1303,6 +1725,7 @@ def _decision_context(payload: dict[str, Json]) -> Json:
         action = proposal.get("action")
     return {
         "action": action if isinstance(action, str) else None,
+        "as_of": proposal.get("as_of") if isinstance(proposal, dict) else None,
         "fill": payload.get("fill"),
         "inference": payload.get("inference"),
         "model_identity": payload.get("model_identity"),
@@ -1329,6 +1752,147 @@ def _position_rows(
             }
         )
     return rows
+
+
+def _pilot_invalidations_agree(ledger: SQLiteLedger, as_of: datetime) -> bool:
+    """Both books must see identical invalidation notices at the cutoff."""
+    if ledger.path.name not in {"terra.sqlite", "sol.sqlite"}:
+        return False
+    notices: list[tuple[EvidenceItem, ...]] = []
+    for name in ("terra.sqlite", "sol.sqlite"):
+        path = ledger.path.parent / name
+        if not path.is_file():
+            return False
+        events = SQLiteLedger.open_existing(path).verified_events()
+        packet = packet_through(events, until=as_of)
+        notices.append(
+            tuple(
+                sorted(
+                    (
+                        item
+                        for item in packet.evidence
+                        if item.source_label == "alpaca-trade-invalidation"
+                        and item.observed_at <= as_of
+                        and item.available_at <= as_of
+                    ),
+                    key=lambda item: item.evidence_id,
+                )
+            )
+        )
+    return notices[0] == notices[1]
+
+
+def _pilot_coverage_available(
+    ledger: SQLiteLedger,
+    as_of: datetime,
+    *,
+    reject_future: bool = False,
+    required_at: datetime | None = None,
+) -> bool:
+    """Both books must agree on the latest recorded corporate-action coverage."""
+    if ledger.path.name not in {"terra.sqlite", "sol.sqlite"}:
+        return False
+    states: list[tuple[datetime, str, datetime]] = []
+    for name in ("terra.sqlite", "sol.sqlite"):
+        path = ledger.path.parent / name
+        if not path.is_file():
+            return False
+        events = SQLiteLedger.open_existing(path).verified_events()
+        checks = [
+            event for event in events if event.event_type == PROSPECTIVE_CA_STATUS
+        ]
+        if reject_future and any(event.timestamp > as_of for event in checks):
+            return False
+        visible = [event for event in checks if event.timestamp <= as_of]
+        if not visible:
+            return False
+        latest = visible[-1]
+        status = thaw(latest.payload).get("status")
+        raw_coverage = thaw(latest.payload).get("coverage_at")
+        if not isinstance(raw_coverage, str):
+            return False
+        try:
+            coverage_at = datetime.fromisoformat(raw_coverage)
+        except ValueError:
+            return False
+        if coverage_at.tzinfo is None or coverage_at > latest.timestamp:
+            return False
+        if status not in {"complete", "unavailable"}:
+            return False
+        if (
+            latest.deduplication_key
+            != f"prospective-ca:{status}:{latest.timestamp.isoformat()}"
+        ):
+            return False
+        assert isinstance(status, str)
+        states.append((latest.timestamp, status, coverage_at))
+    return (
+        states[0] == states[1]
+        and states[0][1] == "complete"
+        and (required_at is None or states[0][2] >= required_at)
+    )
+
+
+def _split_dates(
+    packet: ResearchPacket, as_of: datetime
+) -> dict[str, tuple[date, ...]]:
+    found: dict[str, list[date]] = {}
+    for item in packet.evidence:
+        if item.available_at > as_of or item.observed_at > as_of:
+            continue
+        day = split_date(item.source_label, item.evidence_id, item.symbol)
+        if day is not None and day <= as_of.date():
+            found.setdefault(item.symbol, []).append(day)
+    return {symbol: tuple(sorted(days)) for symbol, days in found.items()}
+
+
+def _unadjusted_split_holdings(
+    packet: ResearchPacket,
+    events: tuple[AuditEvent, ...],
+    kernel: PortfolioAccountingKernel,
+    as_of: datetime,
+) -> set[str]:
+    splits = _split_dates(packet, as_of)
+    held = {
+        str(item.security_id): symbol_for(packet, item.security_id)
+        for item in kernel.state.holdings
+    }
+    affected: set[str] = set()
+    for security_id, symbol in held.items():
+        for day in splits.get(symbol, ()):
+            quantity = 0
+            for event in events:
+                if event.timestamp > as_of:
+                    continue
+                if event.event_type not in (DECISION, FILL):
+                    continue
+                payload = thaw(event.payload)
+                fill = payload.get("fill")
+                if not isinstance(fill, dict) or fill.get("security_id") != security_id:
+                    continue
+                evidence_id = fill.get("price_evidence_id")
+                evidence = next(
+                    (row for row in packet.evidence if row.evidence_id == evidence_id),
+                    None,
+                )
+                if evidence is None:
+                    affected.add(symbol)
+                    break
+                from drift.prospective.config import NY
+
+                if evidence.observed_at.astimezone(NY).date() >= day:
+                    continue
+                amount = fill.get("quantity")
+                if not isinstance(amount, int) or isinstance(amount, bool):
+                    raise LedgerIntegrityError("recorded fill quantity is invalid")
+                if fill.get("side") == "buy":
+                    quantity += amount
+                elif fill.get("side") == "sell":
+                    quantity -= amount
+            if quantity > 0 or symbol in affected:
+                affected.add(symbol)
+                break
+    return affected
 
 
 def _valuation(
@@ -1455,6 +2019,67 @@ def _pending_executions(
     return pending, used
 
 
+def _valid_pilot_trade(
+    item: EvidenceItem,
+    packet: ResearchPacket,
+    mandate: SimulationMandate,
+    symbol: str,
+    *,
+    benchmark: bool = False,
+) -> bool:
+    from drift.prospective.config import (
+        HOLIDAYS,
+        NY,
+        calendar_dates,
+        session_close_utc,
+        session_open_utc,
+    )
+
+    feeds = {
+        feed
+        for feed in ("iex", "sip")
+        if any(
+            row.source_label == f"alpaca-bars-v2-{feed}-raw"
+            and row.price_role == "close"
+            for row in packet.evidence
+        )
+    }
+    if len(feeds) != 1:
+        return False
+    feed = next(iter(feeds))
+    if item.source_label != f"alpaca-trades-v2-{feed}":
+        return False
+    prefix = f"alpaca-trades-v2-{feed}:{symbol}:"
+    from drift.prospective.trade_identity import normalize_trade_id
+
+    source_id = (
+        item.evidence_id.removeprefix("alpaca:benchmark:")
+        if benchmark
+        else item.evidence_id
+    )
+    canonical = normalize_trade_id(source_id)
+    if canonical is None or not canonical.startswith(prefix):
+        return False
+    raw_time, _exchange, _raw_id = canonical.removeprefix(prefix).rsplit(":", 2)
+    try:
+        observed = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    day = item.observed_at.astimezone(NY).date()
+    allowed = (
+        calendar_dates()
+        if PROSPECTIVE_SEAL_REQUIRED in mandate.acknowledgements
+        else tuple(s.local_date for s in packet.sessions)
+    )
+    return bool(
+        observed == item.observed_at
+        and day in allowed
+        and day.weekday() < 5
+        and day not in HOLIDAYS
+        and session_open_utc(day) <= observed <= session_close_utc(day)
+    )
+
+
 def _next_trade_observation(
     packet: ResearchPacket,
     mandate: SimulationMandate,
@@ -1465,6 +2090,12 @@ def _next_trade_observation(
     used: set[str],
 ) -> tuple[EvidenceItem, str | None] | None:
     """Earliest unused trade print strictly after the decision."""
+    pilot = _pilot_book(mandate)
+    from drift.prospective.trade_identity import normalize_trade_id
+
+    used_keys = {normalize_trade_id(value) for value in used} if pilot else set()
+    invalidated = _invalidated_trade_ids(packet, as_of) if pilot else set()
+
     candidates = [
         item
         for item in packet.evidence
@@ -1477,6 +2108,9 @@ def _next_trade_observation(
         and item.observed_at <= as_of
         and item.available_at <= as_of
         and item.evidence_id not in used
+        and (not pilot or normalize_trade_id(item.evidence_id) not in used_keys)
+        and (not pilot or normalize_trade_id(item.evidence_id) not in invalidated)
+        and (not pilot or _valid_pilot_trade(item, packet, mandate, symbol))
     ]
     if not candidates:
         return None
@@ -1493,6 +2127,71 @@ def _next_trade_observation(
             f"stale_evidence: {chosen.evidence_id} is older than the configured age",
         )
     return chosen, None
+
+
+def _invalidated_trade_ids(packet: ResearchPacket, as_of: datetime) -> set[str]:
+    from drift.prospective.trade_identity import normalize_trade_id
+
+    found: set[str] = set()
+    for item in packet.evidence:
+        prefix = "alpaca:trade-invalid:"
+        if (
+            item.source_label != "alpaca-trade-invalidation"
+            or not item.evidence_id.startswith(prefix)
+            or item.available_at > as_of
+            or item.observed_at > as_of
+        ):
+            continue
+        raw_id, separator, status = item.evidence_id.removeprefix(prefix).rpartition(
+            ":"
+        )
+        canonical = normalize_trade_id(raw_id)
+        if separator and status in {"canceled", "incorrect"} and canonical is not None:
+            found.add(canonical)
+    return found
+
+
+def _invalidated_executions(
+    packet: ResearchPacket, events: tuple[AuditEvent, ...], as_of: datetime
+) -> set[str]:
+    from drift.prospective.trade_identity import normalize_trade_id
+
+    invalidated = _invalidated_trade_ids(packet, as_of)
+    found: set[str] = set()
+    for event in events:
+        if event.event_type != FILL or event.timestamp > as_of:
+            continue
+        payload = thaw(event.payload)
+        evidence_id = payload.get("price_evidence_id")
+        if payload.get("status") == "filled" and isinstance(evidence_id, str):
+            identity = normalize_trade_id(evidence_id)
+            if identity is not None and identity in invalidated:
+                found.add(identity)
+    return found
+
+
+def _invalidated_execution_proposals(
+    packet: ResearchPacket, events: tuple[AuditEvent, ...], as_of: datetime
+) -> set[str]:
+    from drift.prospective.trade_identity import normalize_trade_id
+
+    invalidated = _invalidated_executions(packet, events, as_of)
+    found: set[str] = set()
+    for event in events:
+        if event.event_type != FILL or event.timestamp > as_of:
+            continue
+        payload = thaw(event.payload)
+        identifier, price_id = (
+            payload.get("proposal_id"),
+            payload.get("price_evidence_id"),
+        )
+        if (
+            isinstance(identifier, str)
+            and isinstance(price_id, str)
+            and normalize_trade_id(price_id) in invalidated
+        ):
+            found.add(identifier)
+    return found
 
 
 def _execution_fill(
@@ -1566,6 +2265,211 @@ def _return_ratio(numerator: Decimal, denominator: Decimal) -> tuple[str, bool] 
     return format(rounded, "f"), False
 
 
+def _money_difference(left: Decimal, right: Decimal) -> Decimal | None:
+    with decimal_context():
+        result = left - right
+    return result if Fraction(result) == Fraction(left) - Fraction(right) else None
+
+
+def _portfolio_return(packet: ResearchPacket, nav: str | None) -> str | None:
+    if nav is None:
+        return None
+    initial = parse_money(packet.portfolio_context.cash)
+    difference = _money_difference(parse_money(nav), initial)
+    if difference is None:
+        return None
+    ratio = _return_ratio(difference, initial)
+    return None if ratio is None else ratio[0]
+
+
+def _exposure(market: str | None, nav: str | None) -> str | None:
+    if market is None or nav is None or parse_money(nav) == 0:
+        return None
+    ratio = _return_ratio(parse_money(market), parse_money(nav))
+    return None if ratio is None else ratio[0]
+
+
+def _observed_drawdown(
+    events: tuple[AuditEvent, ...], packet: ResearchPacket, as_of: datetime
+) -> Json:
+    """Drawdown across recorded complete marks, not a continuous maximum."""
+    initial = parse_money(packet.portfolio_context.cash)
+    values = [initial]
+    for event in events:
+        if event.timestamp > as_of or event.event_type not in (MARK, FILL, DECISION):
+            continue
+        payload = thaw(event.payload)
+        snapshot = payload.get("snapshot")
+        if not isinstance(snapshot, dict):
+            continue
+        if event.event_type != MARK and snapshot.get("holdings") != []:
+            continue
+        if event.event_type == MARK and snapshot.get("marked") is not True:
+            continue
+        nav = snapshot.get("net_asset_value")
+        if isinstance(nav, str):
+            value = parse_money(nav)
+            if event.event_type == MARK or value != values[-1]:
+                values.append(value)
+    peak = initial
+    worst = Fraction(0)
+    numerator = Decimal(0)
+    denominator = initial
+    for value in values:
+        peak = max(peak, value)
+        decline = (Fraction(peak) - Fraction(value)) / Fraction(peak)
+        if decline > worst:
+            worst = decline
+            denominator = peak
+            difference = _money_difference(peak, value)
+            if difference is None:
+                return {
+                    "maximum": None,
+                    "valuation_samples": len(values),
+                    "limitation": (
+                        "drawdown difference is not exact in the money context"
+                    ),
+                }
+            numerator = difference
+    ratio = _return_ratio(numerator, denominator)
+    return {
+        "maximum": None if ratio is None else ratio[0],
+        "valuation_samples": len(values),
+        "limitation": "recorded marks only; missing marks can hide a larger drawdown",
+    }
+
+
+def _price_benchmark(
+    packet: ResearchPacket,
+    events: tuple[AuditEvent, ...],
+    as_of: datetime,
+    nav: str | None,
+    session_date: date,
+) -> Json:
+    unavailable: dict[str, Json] = {
+        "status": "unavailable",
+        "series_kind": "price_only_substitute",
+        "reason": "SPY opening and same-session closing observations are unavailable",
+    }
+    decisions = [
+        event
+        for event in events
+        if event.event_type == DECISION
+        and event.timestamp <= as_of
+        and thaw(event.payload).get("status") == "accepted"
+    ]
+    if not decisions or nav is None:
+        return unavailable
+    first_decision = min(event.timestamp for event in decisions)
+    opening = packet.sessions[0].opened_at
+    original_packet, original_mandate, *_rest = replay(events)
+    pilot = PROSPECTIVE_SEAL_REQUIRED in original_mandate.acknowledgements
+    starts = [
+        item
+        for item in packet.evidence
+        if item.symbol == "SPY"
+        and item.price_role == "trade"
+        and (
+            (
+                pilot
+                and item.evidence_id.startswith("alpaca:benchmark:")
+                and item.observed_at > first_decision
+                and item.available_at <= as_of
+            )
+            or (
+                not pilot
+                and item.observed_at == opening
+                and item.available_at <= first_decision
+            )
+        )
+        and item.price is not None
+    ]
+    ends = [
+        item
+        for item in packet.evidence
+        if item.symbol == "SPY"
+        and item.price_role == "close"
+        and item.observed_at.date() == session_date
+        and item.available_at <= as_of
+        and item.observed_at <= as_of
+        and item.price is not None
+        and (not pilot or _valid_pilot_close(item, "SPY", original_packet))
+    ]
+    if len(starts) != 1 or not ends:
+        return unavailable
+    start = starts[0]
+    end = max(ends, key=lambda item: (item.observed_at, item.available_at))
+    if pilot:
+        from drift.prospective.trade_identity import normalize_trade_id
+
+        baseline_id = normalize_trade_id(
+            start.evidence_id.removeprefix("alpaca:benchmark:")
+        )
+        if (
+            baseline_id is None
+            or baseline_id in _invalidated_trade_ids(packet, as_of)
+            or not _valid_pilot_trade(
+                start, original_packet, original_mandate, "SPY", benchmark=True
+            )
+        ):
+            return unavailable
+    same_feed = start.source_label == end.source_label or any(
+        start.source_label == f"alpaca-trades-v2-{feed}"
+        and end.source_label == f"alpaca-bars-v2-{feed}-raw"
+        for feed in ("iex", "sip")
+    )
+    if not same_feed or start.price is None or end.price is None:
+        return unavailable
+    if pilot and (
+        start.observed_at > end.observed_at
+        or any(
+            event.event_type == FILL
+            and event.timestamp <= as_of
+            and thaw(event.payload).get("status") == "filled"
+            and (
+                event.timestamp <= start.available_at
+                or not any(
+                    item.evidence_id == thaw(event.payload).get("price_evidence_id")
+                    and item.observed_at >= start.observed_at
+                    for item in packet.evidence
+                )
+            )
+            for event in events
+        )
+    ):
+        return unavailable
+    if any(
+        start.observed_at.date() < day <= end.observed_at.date()
+        for day in _split_dates(packet, as_of).get("SPY", ())
+    ):
+        return {
+            **unavailable,
+            "reason": "SPY price series crosses an unadjusted split",
+        }
+    start_price, end_price = parse_money(start.price), parse_money(end.price)
+    difference = _money_difference(end_price, start_price)
+    if difference is None:
+        return unavailable
+    change = _return_ratio(difference, start_price)
+    return {
+        "status": "available",
+        "series_kind": "price_only_substitute",
+        "series_change": None if change is None else change[0],
+        "portfolio_change": _portfolio_return(packet, nav),
+        "start_evidence_id": start.evidence_id,
+        "end_evidence_id": end.evidence_id,
+        "source_label": start.source_label,
+        "limitation": (
+            "SPY price return; dividends are not credited to either side"
+            + (
+                "; benchmark begins after both first decisions while books were in cash"
+                if pilot
+                else ""
+            )
+        ),
+    }
+
+
 def _benchmark(packet: ResearchPacket, as_of: datetime, nav: str | None) -> Json:
     if not packet.benchmark:
         return {
@@ -1594,13 +2498,18 @@ def _benchmark(packet: ResearchPacket, as_of: datetime, nav: str | None) -> Json
             "series_label": _SERIES_LABELS[end.series_kind],
             "status": "unavailable",
         }
-    series = _return_ratio(
-        parse_money(end.level) - parse_money(start.level), parse_money(start.level)
+    difference = _money_difference(parse_money(end.level), parse_money(start.level))
+    series = (
+        None
+        if difference is None
+        else _return_ratio(difference, parse_money(start.level))
     )
     portfolio = None
     if nav is not None:
         initial = parse_money(packet.portfolio_context.cash)
-        portfolio = _return_ratio(parse_money(nav) - initial, initial)
+        difference = _money_difference(parse_money(nav), initial)
+        if difference is not None:
+            portfolio = _return_ratio(difference, initial)
     series_change = None if series is None else series[0]
     portfolio_change = None if portfolio is None else portfolio[0]
     status = (
@@ -1610,7 +2519,12 @@ def _benchmark(packet: ResearchPacket, as_of: datetime, nav: str | None) -> Json
     )
     return {
         "end_level": end.level,
-        "limitations": list(end.limitations),
+        "limitations": list[Json](end.limitations)
+        + (
+            ["portfolio dividends are not credited; total-return series includes them"]
+            if end.series_kind == "sp500_total_return"
+            else []
+        ),
         "portfolio_change": portfolio_change,
         "portfolio_change_exact": None if portfolio is None else portfolio[1],
         "ratio_precision": RETURN_RATIO_PRECISION,

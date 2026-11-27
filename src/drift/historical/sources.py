@@ -14,7 +14,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -29,6 +29,17 @@ Feed = Literal["sip", "iex"]
 
 
 @dataclass(frozen=True)
+class CorporateSplit:
+    """One source split and the time its API response was received."""
+
+    symbol: str
+    ex_date: date
+    source_id: str
+    kind: str
+    received_at: datetime
+
+
+@dataclass(frozen=True)
 class PriceBar:
     """One daily open and close. Volume is text, not a fill price."""
 
@@ -38,6 +49,14 @@ class PriceBar:
     close_price: str
     volume: str | None
     source_label: str
+
+
+@dataclass(frozen=True)
+class TimedPriceBar(PriceBar):
+    """Pilot-only bar with source receipt and corporate-action observations."""
+
+    received_at: datetime | None = None
+    splits: tuple[CorporateSplit, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -688,6 +707,11 @@ def load_alpaca_bars(
     symbols: tuple[str, ...],
     start: str,
     end: str,
+    *,
+    preferred_feed: Feed | None = None,
+    check_adjustments: bool = True,
+    capture_receipt: bool = False,
+    corporate_action_receipts: list[datetime] | None = None,
 ) -> tuple[str | None, tuple[PriceBar, ...], tuple[str, ...], str, frozenset[date]]:
     """SIP first, then IEX. Raw bars only. A refusal does not invent a price."""
     if credential_names() is None:
@@ -713,12 +737,20 @@ def load_alpaca_bars(
         elif gap is not None:
             gaps.append(gap)
     candidates = entitled_feeds(statuses)
+    if preferred_feed is not None:
+        candidates = tuple(feed for feed in candidates if feed == preferred_feed)
+        if not candidates:
+            gaps.append(f"The selected Alpaca {preferred_feed} feed is unavailable.")
     if not candidates:
         return None, (), tuple(gaps), "", frozenset()
     chosen = None
     bars: tuple[PriceBar, ...] = ()
     for feed in candidates:
-        fetched, error = _paged_bars(symbols, start, end, feed)
+        fetched, error = (
+            _paged_bars(symbols, start, end, feed, capture_receipt=True)
+            if capture_receipt
+            else _paged_bars(symbols, start, end, feed)
+        )
         present = {bar.symbol for bar in fetched}
         covered = bool(fetched) and all(symbol in present for symbol in symbols)
         if error is None and covered:
@@ -735,13 +767,33 @@ def load_alpaca_bars(
         f"Book uses Alpaca {chosen} daily bars, adjustment=raw, "
         "rounded half-up to cents. Not dividend-adjusted."
     )
-    if _adjustment_changes(symbols[0], chosen):
+    if check_adjustments and _adjustment_changes(symbols[0], chosen):
         note += " Alpaca adjustment=all changed a sampled close versus raw."
-    splits, dividends, action_gap = _corporate_actions(symbols, start, end)
+    if capture_receipt:
+        splits, dividends, action_gap, split_details = _pilot_corporate_actions(
+            symbols, start, end, receipts=corporate_action_receipts
+        )
+    else:
+        splits, dividends, action_gap = _corporate_actions(symbols, start, end)
+        split_details = ()
     if action_gap is not None:
         gaps.append(action_gap)
+        if corporate_action_receipts is not None:
+            corporate_action_receipts.clear()
     if dividends:
         note += f" {dividends} cash dividends were observed and are not credited."
+    if capture_receipt:
+        bars = tuple(
+            replace(
+                bar,
+                splits=tuple(
+                    item for item in split_details if item.symbol == bar.symbol
+                ),
+            )
+            if isinstance(bar, TimedPriceBar)
+            else bar
+            for bar in bars
+        )
     return chosen, bars, tuple(gaps), note, splits
 
 
@@ -787,10 +839,16 @@ def load_alpaca_news(
 
 
 def _paged_bars(
-    symbols: tuple[str, ...], start: str, end: str, feed: Feed
+    symbols: tuple[str, ...],
+    start: str,
+    end: str,
+    feed: Feed,
+    *,
+    capture_receipt: bool = False,
 ) -> tuple[tuple[PriceBar, ...], str | None]:
     rows: list[PriceBar] = []
     token: str | None = None
+    seen_tokens: set[str] = set()
     for _page in range(20):
         query = {
             "adjustment": "raw",
@@ -803,19 +861,62 @@ def _paged_bars(
         }
         if token is not None:
             query["page_token"] = token
-        payload, status = _alpaca_json(ALPACA_BARS_ROUTE, query)
+        if capture_receipt:
+            payload, status, received_at = _alpaca_json_timed(ALPACA_BARS_ROUTE, query)
+        else:
+            payload, status = _alpaca_json(ALPACA_BARS_ROUTE, query)
+            received_at = None
         if status != 200 or payload is None:
             return tuple(rows), f"Alpaca bars returned HTTP {status} for feed {feed}."
+        if capture_receipt:
+            if (
+                not isinstance(payload, dict)
+                or not isinstance(payload.get("bars"), dict)
+                or "next_page_token" not in payload
+            ):
+                return (), f"Alpaca bars returned a malformed page for feed {feed}."
+            page_bars = payload["bars"]
+            for symbol, entries in page_bars.items():
+                if symbol not in symbols or not isinstance(entries, list):
+                    return (), f"Alpaca bars returned a malformed page for feed {feed}."
+                try:
+                    parsed = parse_alpaca_bars(symbol, payload, feed)
+                except TypeError, ValueError:
+                    return (), f"Alpaca bars returned malformed rows for feed {feed}."
+                if len(parsed) != len(entries):
+                    return (), f"Alpaca bars returned malformed rows for feed {feed}."
         if isinstance(payload, dict):
             bars = payload.get("bars")
             if isinstance(bars, dict):
                 for symbol in symbols:
-                    rows.extend(parse_alpaca_bars(symbol, payload, feed))
+                    for bar in parse_alpaca_bars(symbol, payload, feed):
+                        rows.append(
+                            TimedPriceBar(
+                                bar.symbol,
+                                bar.day,
+                                bar.open_price,
+                                bar.close_price,
+                                bar.volume,
+                                bar.source_label,
+                                received_at,
+                            )
+                            if capture_receipt
+                            else bar
+                        )
         raw_token = (
             payload.get("next_page_token") if isinstance(payload, dict) else None
         )
+        if (
+            capture_receipt
+            and raw_token is not None
+            and (not isinstance(raw_token, str) or not raw_token)
+        ):
+            return (), f"Alpaca bars returned a malformed page token for feed {feed}."
         if not isinstance(raw_token, str) or raw_token == "":
             return tuple(rows), None
+        if capture_receipt and raw_token in seen_tokens:
+            return (), f"Alpaca bars repeated a page token for feed {feed}."
+        seen_tokens.add(raw_token)
         token = raw_token
     return tuple(rows), f"Alpaca bars for feed {feed} were truncated."
 
@@ -863,10 +964,189 @@ def _corporate_actions(
     return splits, dividends, None
 
 
+def _pilot_corporate_actions(
+    symbols: tuple[str, ...],
+    start: str,
+    end: str,
+    *,
+    receipts: list[datetime] | None = None,
+) -> tuple[frozenset[date], int, str | None, tuple[CorporateSplit, ...]]:
+    dates: set[date] = set()
+    dividends = 0
+    details: dict[tuple[str, date], CorporateSplit] = {}
+    token: str | None = None
+    seen_tokens: set[str] = set()
+    for _page in range(20):
+        query = {
+            "end": end[:10],
+            "limit": "1000",
+            "start": start[:10],
+            "symbols": ",".join(symbols),
+            "data_quality": "all",
+            "types": "forward_split,reverse_split,unit_split,cash_dividend",
+        }
+        if token is not None:
+            query["page_token"] = token
+        payload, status, received = _alpaca_json_timed("/v1/corporate-actions", query)
+        if receipts is not None and received is not None:
+            receipts.append(received)
+        if status != 200 or not isinstance(payload, dict) or received is None:
+            return (
+                frozenset(dates),
+                dividends,
+                f"Alpaca corporate actions returned HTTP {status}.",
+                tuple(details.values()),
+            )
+        actions = payload.get("corporate_actions")
+        if not isinstance(actions, dict) or "next_page_token" not in payload:
+            return (
+                frozenset(dates),
+                dividends,
+                "Alpaca corporate actions response is incomplete.",
+                tuple(details.values()),
+            )
+        page_dates, page_dividends = parse_alpaca_corporate_actions(payload)
+        dates.update(page_dates)
+        dividends += page_dividends
+        for key in ("forward_splits", "reverse_splits", "unit_splits"):
+            entries = actions.get(key, [])
+            if not isinstance(entries, list):
+                return (
+                    frozenset(dates),
+                    dividends,
+                    "Alpaca corporate actions split rows are incomplete.",
+                    tuple(details.values()),
+                )
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    return (
+                        frozenset(dates),
+                        dividends,
+                        "Alpaca corporate actions split row is invalid.",
+                        tuple(details.values()),
+                    )
+                identifier = entry.get("id")
+                symbol: object
+                symbols_for_entry: list[object]
+                if key == "unit_splits":
+                    old_symbol, new_symbol = (
+                        entry.get("old_symbol"),
+                        entry.get("new_symbol"),
+                    )
+                    alternate = entry.get("alternate_symbol")
+                    ex_date = entry.get("effective_date")
+                    if not isinstance(old_symbol, str) or not isinstance(
+                        new_symbol, str
+                    ):
+                        return (
+                            frozenset(dates),
+                            dividends,
+                            "Alpaca unit split attribution is incomplete.",
+                            tuple(details.values()),
+                        )
+                    matches = {
+                        value for value in (old_symbol, new_symbol) if value in symbols
+                    }
+                    if (
+                        not matches
+                        or old_symbol != new_symbol
+                        or alternate not in (None, "", old_symbol)
+                    ):
+                        return (
+                            frozenset(dates),
+                            dividends,
+                            "Alpaca unit split attribution is incomplete.",
+                            tuple(details.values()),
+                        )
+                    symbols_for_entry = list[object](sorted(matches))
+                    symbol = symbols_for_entry[0]
+                else:
+                    symbol, ex_date = entry.get("symbol"), entry.get("ex_date")
+                    new_symbol = entry.get("new_symbol")
+                    if new_symbol not in (None, "", symbol):
+                        return (
+                            frozenset(dates),
+                            dividends,
+                            "Alpaca split changes ticker and requires "
+                            "identity reconciliation.",
+                            tuple(details.values()),
+                        )
+                    symbols_for_entry = [symbol]
+                if (
+                    not isinstance(symbol, str)
+                    or symbol not in symbols
+                    or not isinstance(ex_date, str)
+                    or not isinstance(identifier, str)
+                    or not identifier
+                ):
+                    return (
+                        frozenset(dates),
+                        dividends,
+                        "Alpaca corporate actions split identity is incomplete.",
+                        tuple(details.values()),
+                    )
+                try:
+                    day = date.fromisoformat(ex_date)
+                except ValueError:
+                    return (
+                        frozenset(dates),
+                        dividends,
+                        "Alpaca corporate actions split ex-date is invalid.",
+                        tuple(details.values()),
+                    )
+                for affected in symbols_for_entry:
+                    assert isinstance(affected, str)
+                    record = CorporateSplit(
+                        affected, day, identifier, key.removesuffix("s"), received
+                    )
+                    dates.add(day)
+                    prior = details.get((affected, day))
+                    if prior is not None and (
+                        prior.source_id != identifier or prior.kind != record.kind
+                    ):
+                        return (
+                            frozenset(dates),
+                            dividends,
+                            "Alpaca corporate actions contain conflicting splits.",
+                            tuple(details.values()),
+                        )
+                    if prior is None:
+                        details[(affected, day)] = record
+        next_token = payload.get("next_page_token")
+        if next_token is None:
+            return frozenset(dates), dividends, None, tuple(details.values())
+        if (
+            not isinstance(next_token, str)
+            or not next_token
+            or next_token in seen_tokens
+        ):
+            return (
+                frozenset(dates),
+                dividends,
+                "Alpaca corporate actions pagination is invalid.",
+                tuple(details.values()),
+            )
+        seen_tokens.add(next_token)
+        token = next_token
+    return (
+        frozenset(dates),
+        dividends,
+        "Alpaca corporate actions results were truncated.",
+        tuple(details.values()),
+    )
+
+
 def _alpaca_json(path: str, query: dict[str, str]) -> tuple[object | None, int | None]:
+    payload, status, _received = _alpaca_json_timed(path, query)
+    return payload, status
+
+
+def _alpaca_json_timed(
+    path: str, query: dict[str, str]
+) -> tuple[object | None, int | None, datetime | None]:
     names = credential_names()
     if names is None:
-        return None, None
+        return None, None, None
     env = dict(os.environ)
     env.update(_dotenv(Path(".env")))
     request = urllib.request.Request(
@@ -881,8 +1161,10 @@ def _alpaca_json(path: str, query: dict[str, str]) -> tuple[object | None, int |
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             status = response.status if isinstance(response.status, int) else None
-            return json.loads(response.read().decode("utf-8")), status
+            body = response.read()
+            received_at = datetime.now(UTC)
+            return json.loads(body.decode("utf-8")), status, received_at
     except urllib.error.HTTPError as error:
-        return None, error.code
+        return None, error.code, None
     except OSError, UnicodeError, urllib.error.URLError, json.JSONDecodeError:
-        return None, None
+        return None, None, None

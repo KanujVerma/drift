@@ -55,6 +55,11 @@ REFLECTION = "manager.reflection"
 FEEDBACK = "manager.feedback"
 INGEST = "manager.ingest"
 FILL = "manager.fill"
+PROSPECTIVE_REVIEW = "manager.prospective_review"
+PROSPECTIVE_INTENT = "manager.prospective_intent"
+PROSPECTIVE_SEAL = "manager.prospective_seal"
+PROSPECTIVE_EXPIRED = "manager.prospective_expired"
+PROSPECTIVE_CA_STATUS = "manager.prospective_corporate_action_status"
 
 CLOCK_LIMITATIONS = tuple(
     sorted(
@@ -490,7 +495,15 @@ def replay(
         if event.event_type in (DECISION, MARK, FILL):
             apply_recorded_effect(kernel, packet, payload)
             continue
-        if event.event_type in (REFLECTION, FEEDBACK):
+        if event.event_type in (
+            REFLECTION,
+            FEEDBACK,
+            PROSPECTIVE_REVIEW,
+            PROSPECTIVE_INTENT,
+            PROSPECTIVE_SEAL,
+            PROSPECTIVE_EXPIRED,
+            PROSPECTIVE_CA_STATUS,
+        ):
             continue
         message = f"unknown manager event {event.event_type}"
         raise LedgerIntegrityError(message)

@@ -7,6 +7,8 @@ This module does not choose a fill.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -55,6 +57,80 @@ def citation_refusal(
     """Return a rejection reason, or None when the row may be cited."""
     if _withdrawn(row):
         return f"withdrawn_evidence: {row.evidence_id} was withdrawn"
+    if row.source_label in {"alpaca-trade-invalidation", "sec-companyfacts-dispute"}:
+        return f"unsupported_evidence: {row.evidence_id} is a data-quality notice"
+    if row.source_label.startswith("alpaca-trades-v2-"):
+        from drift.prospective.trade_identity import normalize_trade_id
+
+        canonical = normalize_trade_id(
+            row.evidence_id.removeprefix("alpaca:benchmark:")
+        )
+        if canonical is not None:
+            for other in rows:
+                prefix = "alpaca:trade-invalid:"
+                if (
+                    other.source_label != "alpaca-trade-invalidation"
+                    or not other.evidence_id.startswith(prefix)
+                    or other.observed_at > as_of
+                    or other.available_at > as_of
+                ):
+                    continue
+                identifier, separator, status = other.evidence_id.removeprefix(
+                    prefix
+                ).rpartition(":")
+                if (
+                    separator
+                    and status in {"canceled", "incorrect"}
+                    and normalize_trade_id(identifier) == canonical
+                ):
+                    return f"withdrawn_evidence: {row.evidence_id} was invalidated"
+    parts = row.evidence_id.split(":")
+    if row.source_label == "sec-companyfacts-pilot":
+        fact = _parse_fact(row)
+        if fact is not None:
+            identity = [
+                fact[key]
+                for key in ("symbol", "concept", "end", "start", "filed", "unit")
+            ]
+            group = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+            if any(
+                other.source_label == "sec-companyfacts-dispute"
+                and other.evidence_id.startswith(f"sec:fact-dispute:{group}:")
+                and other.observed_at <= as_of
+                and other.available_at <= as_of
+                for other in rows
+            ):
+                return (
+                    f"disputed_evidence: {row.evidence_id} "
+                    "has conflicting source values"
+                )
+    if row.source_label == "sec-companyfacts-pilot" and row.evidence_id.endswith(
+        ":accn=missing"
+    ):
+        return f"unsupported_evidence: {row.evidence_id} lacks a source accession"
+    if (
+        row.source_label == "sec-companyfacts-pilot"
+        and len(parts) == 7
+        and parts[:2] == ["sec", "fact"]
+        and _DATE.fullmatch(parts[4])
+        and _DATE.fullmatch(parts[5])
+        and parts[6].isdigit()
+    ):
+        return f"unsupported_evidence: {row.evidence_id} lacks period and unit identity"
+    if (
+        row.source_label == "sec-companyfacts-pilot"
+        and len(parts) >= 9
+        and parts[:2] == ["sec", "fact"]
+        and parts[3]
+        in {
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "Revenues",
+            "SalesRevenueNet",
+            "EarningsPerShareDiluted",
+        }
+        and parts[5] == "none"
+    ):
+        return f"unsupported_evidence: {row.evidence_id} lacks a period start"
     if _durable(row) and _superseded(row, as_of, rows):
         return f"superseded_evidence: {row.evidence_id} has a later replacement"
     if policy == "research" and (_durable(row) or row.kind == "observation"):
@@ -202,7 +278,11 @@ def _parse_fact(row: CitationRow) -> dict[str, str] | None:
         and (parts[5] == "none" or _DATE.fullmatch(parts[5]))
         and _DATE.fullmatch(parts[6])
     ):
-        start, filed, unit = parts[5], parts[6], ":".join(parts[8:])
+        start, filed, unit = (
+            parts[5],
+            parts[6],
+            ":".join(parts[8:]).split(":accn=", 1)[0],
+        )
     elif _DATE.fullmatch(parts[5]):
         start, filed, unit = "none", parts[5], ":".join(parts[7:])
     else:

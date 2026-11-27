@@ -9,12 +9,15 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from drift.manager.models import (
+    PROSPECTIVE_READINESS,
+    PROSPECTIVE_SEAL_REQUIRED,
     REQUIRED_MANDATE_ACKNOWLEDGEMENTS,
     Instrument,
     SimulationMandate,
     SimulationSession,
 )
 from drift.memory.recorder import deterministic_memory_uuid7
+from drift.research.universe import RESEARCH_UNIVERSE
 
 NY = ZoneInfo("America/New_York")
 OBSERVATION_COUNT = 20
@@ -40,6 +43,23 @@ UNIVERSE = (
     ("MSFT", "0000789019", "Microsoft Corporation"),
     ("JNJ", "0000200406", "Johnson & Johnson"),
     ("SPY", "0000884394", "SPDR S&P 500 ETF Trust"),
+)
+# Pilot trading authorization is explicit; a research-universe addition alone
+# cannot authorize simulated trading. UNIVERSE remains the historical set.
+TRADING_SYMBOLS = (
+    "AAPL",
+    "MSFT",
+    "AMZN",
+    "JPM",
+    "JNJ",
+    "XOM",
+    "CAT",
+    "PG",
+    "NEE",
+    "LIN",
+    "SPY",
+    "QQQ",
+    "MDY",
 )
 MODELS = {
     "terra": "codex/gpt-6.1-terra@xhigh",
@@ -126,6 +146,7 @@ def session_for(day: date) -> SimulationSession:
 
 
 def instruments() -> tuple[Instrument, ...]:
+    """The original v0.2 and historical-replay instrument set."""
     return tuple(
         Instrument(
             symbol=symbol,
@@ -133,6 +154,17 @@ def instruments() -> tuple[Instrument, ...]:
             name=name,
         )
         for symbol, _cik, name in UNIVERSE
+    )
+
+
+def pilot_instruments() -> tuple[Instrument, ...]:
+    return tuple(
+        Instrument(
+            symbol=item.symbol,
+            security_id=deterministic_memory_uuid7(f"prospective-v02:{item.symbol}"),
+            name=item.name,
+        )
+        for item in RESEARCH_UNIVERSE
     )
 
 
@@ -151,6 +183,32 @@ def mandate() -> SimulationMandate:
         + (
             "v0.2 limits are local test configuration, not an approved product mandate",
         ),
+    )
+
+
+def pilot_mandate() -> SimulationMandate:
+    """The expanded pilot authority does not alter the v0.2 baseline."""
+    base = mandate()
+    return base.model_copy(
+        update={
+            "allowed_symbols": TRADING_SYMBOLS,
+            "citation_policy": "research",
+            "acknowledgements": base.acknowledgements + (PROSPECTIVE_SEAL_REQUIRED,),
+        }
+    )
+
+
+def readiness_mandate() -> SimulationMandate:
+    pilot = pilot_mandate()
+    return pilot.model_copy(
+        update={
+            "acknowledgements": tuple(
+                item
+                for item in pilot.acknowledgements
+                if item != PROSPECTIVE_SEAL_REQUIRED
+            )
+            + (PROSPECTIVE_READINESS,)
+        }
     )
 
 
