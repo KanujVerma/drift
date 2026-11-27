@@ -74,6 +74,94 @@ def _exact_sub(left: Decimal, right: Decimal) -> Decimal | None:
     return total
 
 
+def fill_limit_reasons(
+    *,
+    action: Literal["buy", "sell"],
+    symbol: str,
+    quantity: int,
+    fill_price: str,
+    mandate: SimulationMandate,
+    cash: Decimal,
+    cost_basis_by_symbol: Mapping[str, Decimal],
+    quantity_by_symbol: Mapping[str, int],
+) -> tuple[str, ...]:
+    """Cash, position, and oversell checks for one known execution price."""
+    reasons: list[str] = []
+    price = parse_money(fill_price)
+    fee = parse_money(mandate.fill_fee)
+    if action == "buy":
+        gross = _exact_product(price, Decimal(quantity))
+        notional = None if gross is None else _exact_add(gross, fee)
+        if notional is None:
+            reasons.append(
+                "unsafe_position_limit: proposed notional is not exact "
+                "in the portfolio decimal context"
+            )
+        else:
+            denominator: Decimal | None = cash
+            for basis in cost_basis_by_symbol.values():
+                if denominator is None:
+                    break
+                denominator = _exact_add(denominator, basis)
+            existing = cost_basis_by_symbol.get(symbol, Decimal("0"))
+            projected = _exact_add(existing, notional)
+            if denominator is None or projected is None:
+                reasons.append(
+                    "unsafe_position_limit: position limit is not exact "
+                    "in the portfolio decimal context"
+                )
+            else:
+                limit = _exact_product(
+                    parse_money(mandate.max_position_notional_fraction),
+                    denominator,
+                )
+                if limit is None:
+                    reasons.append(
+                        "unsafe_position_limit: position limit is not exact "
+                        "in the portfolio decimal context"
+                    )
+                elif projected > limit:
+                    reasons.append(
+                        "unsafe_position_limit: proposed position notional "
+                        f"{notional} exceeds "
+                        f"{mandate.max_position_notional_fraction} "
+                        f"of the cost-basis denominator {denominator}"
+                    )
+            remaining = None if notional is None else _exact_sub(cash, notional)
+            if remaining is None:
+                reasons.append(
+                    "unsafe_cash: cash after the fill is not exact "
+                    "in the portfolio decimal context"
+                )
+            elif remaining < parse_money(mandate.min_cash_after):
+                reasons.append(
+                    "unsafe_cash: the fill would leave less cash than "
+                    f"{mandate.min_cash_after}"
+                )
+    else:
+        held = quantity_by_symbol.get(symbol, 0)
+        if quantity > held:
+            reasons.append(
+                f"unsafe_oversell: sell quantity {quantity} exceeds "
+                f"held quantity {held}"
+            )
+        else:
+            proceeds = _exact_product(price, Decimal(quantity))
+            net = None if proceeds is None else _exact_sub(proceeds, fee)
+            remaining = None if net is None else _exact_add(cash, net)
+            if proceeds is None or remaining is None:
+                reasons.append(
+                    "unsafe_cash: sale proceeds are not exact in the "
+                    "portfolio decimal context"
+                )
+            elif remaining < parse_money(mandate.min_cash_after):
+                reasons.append(
+                    "unsafe_cash: the sale would leave less cash than "
+                    f"{mandate.min_cash_after}"
+                )
+    return tuple(reasons)
+
+
 def decide_proposal(
     *,
     proposal: InvestmentProposal,
@@ -86,6 +174,7 @@ def decide_proposal(
     current_session: datetime,
     session_date_ok: bool,
     session_in_future: bool,
+    defer_execution: bool = False,
 ) -> Decision:
     """Accept, reject, or escalate one proposal without mutating the book."""
     reasons: list[str] = []
@@ -178,12 +267,18 @@ def decide_proposal(
             cited_outcomes.append(outcome)
 
     supporting = [item for item in cited_items if item.kind in SUPPORTING_KINDS]
+    abstaining = proposal.action == "hold" and not proposal.evidence_ids
     if proposal.action == "buy" and not supporting:
         reasons.append(
             "unsupported_evidence: a buy needs cited fundamental, observation, "
             "or news evidence for the symbol"
         )
-    if proposal.action != "buy" and not supporting and not cited_outcomes:
+    if (
+        not abstaining
+        and proposal.action != "buy"
+        and not supporting
+        and not cited_outcomes
+    ):
         reasons.append(
             "unsupported_evidence: the proposal has no supporting evidence "
             "for the symbol"
@@ -191,7 +286,7 @@ def decide_proposal(
 
     fill_price: str | None = None
     price_evidence_id: str | None = None
-    if proposal.action in ("buy", "sell"):
+    if proposal.action in ("buy", "sell") and not defer_execution:
         priced = [item for item in cited_items if item.price is not None]
         prices = {item.price for item in priced}
         if len(prices) > 1:
@@ -208,79 +303,30 @@ def decide_proposal(
             fill_price = chosen.price
             price_evidence_id = chosen.evidence_id
 
-    if proposal.action == "buy" and fill_price is not None:
-        price = parse_money(fill_price)
-        fee = parse_money(mandate.fill_fee)
-        gross = _exact_product(price, Decimal(proposal.quantity))
-        notional = None if gross is None else _exact_add(gross, fee)
-        if notional is None:
-            reasons.append(
-                "unsafe_position_limit: proposed notional is not exact "
-                "in the portfolio decimal context"
+    if (
+        not defer_execution
+        and proposal.action in ("buy", "sell")
+        and fill_price is not None
+    ):
+        reasons.extend(
+            fill_limit_reasons(
+                action=proposal.action,
+                symbol=proposal.symbol,
+                quantity=proposal.quantity,
+                fill_price=fill_price,
+                mandate=mandate,
+                cash=cash,
+                cost_basis_by_symbol=cost_basis_by_symbol,
+                quantity_by_symbol=quantity_by_symbol,
             )
-        else:
-            denominator: Decimal | None = cash
-            for basis in cost_basis_by_symbol.values():
-                if denominator is None:
-                    break
-                denominator = _exact_add(denominator, basis)
-            existing = cost_basis_by_symbol.get(proposal.symbol, Decimal("0"))
-            projected = _exact_add(existing, notional)
-            if denominator is None or projected is None:
-                reasons.append(
-                    "unsafe_position_limit: position limit is not exact "
-                    "in the portfolio decimal context"
-                )
-            else:
-                limit = _exact_product(
-                    parse_money(mandate.max_position_notional_fraction),
-                    denominator,
-                )
-                if limit is None:
-                    reasons.append(
-                        "unsafe_position_limit: position limit is not exact "
-                        "in the portfolio decimal context"
-                    )
-                elif projected > limit:
-                    reasons.append(
-                        "unsafe_position_limit: proposed position notional "
-                        f"{notional} exceeds {mandate.max_position_notional_fraction} "
-                        f"of the cost-basis denominator {denominator}"
-                    )
-            remaining = _exact_sub(cash, notional)
-            if remaining is None:
-                reasons.append(
-                    "unsafe_cash: cash after the fill is not exact "
-                    "in the portfolio decimal context"
-                )
-            elif remaining < parse_money(mandate.min_cash_after):
-                reasons.append(
-                    "unsafe_cash: the fill would leave less cash than "
-                    f"{mandate.min_cash_after}"
-                )
-    if proposal.action == "sell":
+        )
+    elif proposal.action == "sell":
         held = quantity_by_symbol.get(proposal.symbol, 0)
         if proposal.quantity > held:
             reasons.append(
                 f"unsafe_oversell: sell quantity {proposal.quantity} exceeds "
                 f"held quantity {held}"
             )
-        elif fill_price is not None:
-            price = parse_money(fill_price)
-            fee = parse_money(mandate.fill_fee)
-            proceeds = _exact_product(price, Decimal(proposal.quantity))
-            net = None if proceeds is None else _exact_sub(proceeds, fee)
-            remaining = None if net is None else _exact_add(cash, net)
-            if proceeds is None or remaining is None:
-                reasons.append(
-                    "unsafe_cash: sale proceeds are not exact in the "
-                    "portfolio decimal context"
-                )
-            elif remaining < parse_money(mandate.min_cash_after):
-                reasons.append(
-                    "unsafe_cash: the sale would leave less cash than "
-                    f"{mandate.min_cash_after}"
-                )
 
     reject_prefixes = (
         "decision_",
@@ -298,7 +344,11 @@ def decide_proposal(
         status = "escalated"
     else:
         status = "accepted"
-        if not reasons:
+        if abstaining:
+            reasons.append(
+                "abstained: no cited evidence, so the cycle takes no simulated action"
+            )
+        elif not reasons:
             reasons.append("accepted: proposal is inside the simulation mandate")
     if status != "accepted":
         fill_price = None
