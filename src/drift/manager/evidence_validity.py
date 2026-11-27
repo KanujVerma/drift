@@ -13,11 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-_FACT_ID = re.compile(
-    r"^sec:fact:(?P<symbol>[A-Z0-9]+):(?P<concept>[A-Za-z0-9]+):"
-    r"(?P<end>\d{4}-\d{2}-\d{2}):(?P<start>none|\d{4}-\d{2}-\d{2}):"
-    r"(?P<filed>\d{4}-\d{2}-\d{2}):(?P<form>[^:]+):(?P<unit>.+)$"
-)
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_PERIOD_START = re.compile(r"period start (\d{4}-\d{2}-\d{2})")
 _FILING = re.compile(
     r"^(?P<form>10-K/A|10-Q/A|8-K/A|10-K|10-Q|8-K) accession \S+"
     r"(?: report (?P<report>\d{4}-\d{2}-\d{2}))?"
@@ -118,42 +115,68 @@ def _durable(row: CitationRow) -> bool:
 
 
 def _superseded(row: CitationRow, as_of: datetime, rows: Sequence[CitationRow]) -> bool:
-    fact = _FACT_ID.match(row.evidence_id)
+    fact = _parse_fact(row)
     if fact is not None:
         return any(_later_fact(fact, row, other, as_of) for other in rows)
-    filing = _FILING.match(row.summary)
-    if filing is None:
+    return _amended_filing(row, as_of, rows)
+
+
+def _amended_filing(
+    row: CitationRow, as_of: datetime, rows: Sequence[CitationRow]
+) -> bool:
+    """A later amendment replaces the one earlier filing it can be tied to."""
+    identity = _filing_identity(row)
+    if identity is None:
         return False
-    report = filing.group("report")
-    if report is None:
-        return False
-    base = _base_form(filing.group("form"))
     for other in rows:
-        if other.evidence_id == row.evidence_id:
+        if not _later_amendment(other, identity, row, as_of):
             continue
-        if other.available_at > as_of or other.observed_at > as_of:
-            continue
-        if other.observed_at <= row.observed_at:
-            continue
-        parsed = _FILING.match(other.summary)
-        if parsed is None or parsed.group("report") != report:
-            continue
-        if not row.symbol or other.symbol != row.symbol:
-            continue
-        later_form = parsed.group("form")
-        if later_form.endswith("/A") and _base_form(later_form) == base:
+        targets = [
+            candidate
+            for candidate in rows
+            if candidate.evidence_id != other.evidence_id
+            and _filing_identity(candidate) == identity
+            and candidate.observed_at < other.observed_at
+            and candidate.observed_at <= as_of
+            and candidate.available_at <= as_of
+        ]
+        if len(targets) == 1 and targets[0].evidence_id == row.evidence_id:
             return True
     return False
 
 
+def _later_amendment(
+    other: CitationRow,
+    identity: tuple[str, str, str],
+    row: CitationRow,
+    as_of: datetime,
+) -> bool:
+    parsed = _FILING.match(other.summary)
+    if parsed is None or not parsed.group("form").endswith("/A"):
+        return False
+    if _filing_identity(other) != identity:
+        return False
+    if other.evidence_id == row.evidence_id or other.observed_at <= row.observed_at:
+        return False
+    return other.observed_at <= as_of and other.available_at <= as_of
+
+
+def _filing_identity(row: CitationRow) -> tuple[str, str, str] | None:
+    parsed = _FILING.match(row.summary)
+    report = None if parsed is None else parsed.group("report")
+    if parsed is None or report is None or not row.symbol:
+        return None
+    return row.symbol, _base_form(parsed.group("form")), report
+
+
 def _later_fact(
-    fact: re.Match[str], row: CitationRow, other: CitationRow, as_of: datetime
+    fact: dict[str, str], row: CitationRow, other: CitationRow, as_of: datetime
 ) -> bool:
     if other.evidence_id == row.evidence_id:
         return False
     if other.available_at > as_of or other.observed_at > as_of:
         return False
-    parsed = _FACT_ID.match(other.evidence_id)
+    parsed = _parse_fact(other)
     if parsed is None:
         return False
     return (
@@ -164,6 +187,38 @@ def _later_fact(
         and parsed["unit"] == fact["unit"]
         and parsed["filed"] > fact["filed"]
     )
+
+
+def _parse_fact(row: CitationRow) -> dict[str, str] | None:
+    """Read the current fact id and the older id that omitted period start."""
+    if not row.evidence_id.startswith("sec:fact:"):
+        return None
+    parts = row.evidence_id.split(":")
+    if len(parts) < 8 or not _DATE.fullmatch(parts[4]):
+        return None
+    symbol, concept, end = parts[2], parts[3], parts[4]
+    if (
+        len(parts) >= 9
+        and (parts[5] == "none" or _DATE.fullmatch(parts[5]))
+        and _DATE.fullmatch(parts[6])
+    ):
+        start, filed, unit = parts[5], parts[6], ":".join(parts[8:])
+    elif _DATE.fullmatch(parts[5]):
+        start, filed, unit = "none", parts[5], ":".join(parts[7:])
+    else:
+        return None
+    if start == "none":
+        found = _PERIOD_START.search(row.summary)
+        if found is not None:
+            start = found.group(1)
+    return {
+        "symbol": symbol,
+        "concept": concept,
+        "end": end,
+        "start": start,
+        "filed": filed,
+        "unit": unit,
+    }
 
 
 def _base_form(form: str) -> str:

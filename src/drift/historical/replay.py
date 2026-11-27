@@ -607,11 +607,11 @@ def _texts_due(
 
 
 def _ready_at(item: TextInput, window: Window) -> datetime:
-    """Session gate, then a later source revision, whichever is later."""
-    ready = text_available(item.observed_at, window)
-    if item.available_at is not None and item.available_at > ready:
-        return item.available_at
-    return ready
+    """Gate the later of creation and revision onto a session the book ingests."""
+    stamp = item.observed_at
+    if item.available_at is not None and item.available_at > stamp:
+        stamp = item.available_at
+    return text_available(stamp, window)
 
 
 def _text_item(item: TextInput, available: datetime | None = None) -> EvidenceItem:

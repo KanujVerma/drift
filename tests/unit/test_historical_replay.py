@@ -15,6 +15,7 @@ from drift.historical.replay import (
     Json,
     Study,
     _json_object,
+    _ready_at,
     acknowledge,
     assert_isolated,
     close_time,
@@ -840,6 +841,119 @@ def test_uniform_age_still_rejects_a_fresh_withdrawn_filing() -> None:
     )
     assert refusal is not None
     assert refusal.startswith("withdrawn_evidence")
+
+
+def test_one_amendment_does_not_retire_two_originals() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    first = _filing("one", datetime(2024, 4, 17, 20, tzinfo=UTC), "8-K")
+    second = _filing("two", datetime(2024, 4, 18, 20, tzinfo=UTC), "8-K")
+    amendment = _filing("amend", datetime(2024, 5, 1, 20, tzinfo=UTC), "8-K/A")
+    rows = (first, second, amendment)
+    assert (
+        citation_refusal(first, as_of, rows, policy="research", max_age_hours=336)
+        is None
+    )
+    assert (
+        citation_refusal(second, as_of, rows, policy="research", max_age_hours=336)
+        is None
+    )
+
+
+def test_a_legacy_fact_id_still_matches_its_period() -> None:
+    as_of = datetime(2019, 11, 1, 22, tzinfo=UTC)
+    legacy = CitationRow(
+        evidence_id=("sec:fact:AAPL:Revenues:2017-12-30:2019-01-30:10-Q:USD"),
+        kind="fundamental",
+        source_label="sec-companyfacts",
+        summary=(
+            "Revenues 1 USD period end 2017-12-30 period start 2017-10-01 "
+            "form 10-Q filed 2019-01-30."
+        ),
+        limitations=("fixture",),
+        observed_at=datetime(2019, 1, 30, 23, 59, tzinfo=UTC),
+        available_at=datetime(2019, 1, 30, 23, 59, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    same = CitationRow(
+        evidence_id=(
+            "sec:fact:AAPL:Revenues:2017-12-30:2017-10-01:2019-10-31:10-K:USD"
+        ),
+        kind="fundamental",
+        source_label="sec-companyfacts",
+        summary=(
+            "Revenues 2 USD period end 2017-12-30 period start 2017-10-01 "
+            "form 10-K filed 2019-10-31."
+        ),
+        limitations=("fixture",),
+        observed_at=datetime(2019, 10, 31, 23, 59, tzinfo=UTC),
+        available_at=datetime(2019, 10, 31, 23, 59, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    other_period = CitationRow(
+        evidence_id=(
+            "sec:fact:AAPL:Revenues:2017-12-30:2017-07-01:2019-10-31:10-K:USD"
+        ),
+        kind="fundamental",
+        source_label="sec-companyfacts",
+        summary=(
+            "Revenues 9 USD period end 2017-12-30 period start 2017-07-01 "
+            "form 10-K filed 2019-10-31."
+        ),
+        limitations=("fixture",),
+        observed_at=datetime(2019, 10, 31, 23, 59, tzinfo=UTC),
+        available_at=datetime(2019, 10, 31, 23, 59, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    replaced = citation_refusal(
+        legacy, as_of, (legacy, same), policy="research", max_age_hours=336
+    )
+    assert replaced is not None
+    assert replaced.startswith("superseded_evidence")
+    kept = citation_refusal(
+        legacy,
+        as_of,
+        (legacy, other_period),
+        policy="research",
+        max_age_hours=336,
+    )
+    assert kept is None
+
+
+def test_a_weekend_revision_is_ready_at_the_next_open() -> None:
+    window = Window(
+        regime="bullish",
+        warmup_day=date(2024, 6, 6),
+        decision_days=(date(2024, 6, 7), date(2024, 6, 10)),
+        settlement_day=date(2024, 6, 11),
+        threshold_index=0,
+        total_return=Decimal("0"),
+        max_drawdown=Decimal("0"),
+        max_runup=Decimal("0"),
+    )
+    item = TextInput(
+        evidence_id="alpaca:news:weekend:AAPL",
+        symbol="AAPL",
+        kind="news",
+        observed_at=datetime(2024, 6, 7, 15, tzinfo=UTC),
+        available_at=datetime(2024, 6, 9, 16, tzinfo=UTC),
+        summary="Revised headline.",
+        source_label="alpaca-news",
+        limitations=("headline",),
+    )
+    assert _ready_at(item, window) == open_time(date(2024, 6, 10))
+
+
+def _filing(name: str, stamp: datetime, form: str) -> CitationRow:
+    return CitationRow(
+        evidence_id=f"sec:filing:{name}",
+        kind="news",
+        source_label="sec-submissions",
+        summary=f"{form} accession {name} report 2024-04-17.",
+        limitations=("SEC submissions row",),
+        observed_at=stamp,
+        available_at=stamp,
+        symbol="MSFT",
+    )
 
 
 def test_research_policy_does_not_freshen_an_old_fill() -> None:
