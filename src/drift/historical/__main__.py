@@ -19,6 +19,7 @@ from typing import Literal
 
 from drift.errors import LedgerIntegrityError
 from drift.historical.replay import (
+    BOOKS,
     Study,
     apply_native,
     assert_isolated,
@@ -35,6 +36,7 @@ from drift.historical.sources import (
     parse_submission_filings,
     parse_yahoo_chart,
     probe_alpaca,
+    restamp_companyfact,
     submission_file_names,
     yahoo_adjustment_note,
     yahoo_split_dates,
@@ -56,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         "review", help="write the next prompt, or record a proposal"
     )
     review.add_argument("--regime", required=True)
-    review.add_argument("--book", choices=("memory", "nomemory"), required=True)
+    review.add_argument("--book", choices=BOOKS, required=True)
     review.add_argument("--model", choices=("terra", "sol"), required=True)
     review.add_argument("--proposal", type=Path)
     sub.add_parser("report", help="summarize recorded books")
@@ -194,7 +196,7 @@ def report(state: Path) -> dict[str, object]:
     windows = criteria.get("windows") if isinstance(criteria, dict) else None
     if isinstance(windows, dict):
         for regime in windows:
-            for book in ("memory", "nomemory"):
+            for book in BOOKS:
                 for model in ("terra", "sol"):
                     path = state / str(regime) / book / model / "reports.jsonl"
                     key = f"{regime}/{book}/{model}"
@@ -257,7 +259,10 @@ def _load(state: Path, regime: str) -> tuple[Study, Window]:
             evidence_id=row["evidence_id"],
             symbol=row["symbol"],
             kind=row["kind"],
-            observed_at=datetime.fromisoformat(row["observed_at"]),
+            observed_at=restamp_companyfact(
+                datetime.fromisoformat(row["observed_at"]),
+                str(row["source_label"]),
+            ),
             summary=row["summary"],
             source_label=row["source_label"],
             limitations=tuple(row["limitations"]),
