@@ -32,7 +32,7 @@ work and evidence rather than a duplicated status board.
    edge from simulation alone. Source rights and any promotion-grade evidence
    remain subject to their applicable qualification requirements.
 4. **Evaluate models only when separately authorized.** The future candidate
-   set is GPT-6.1 Tera Extra High and GPT-6.2 Sol Extra High, followed by Hermes
+   set is GPT-6.1 Terra Extra High and GPT-6.2 Sol Extra High, followed by Hermes
    only if justified; Jev and other models are deferred. Compare usefulness and
    cost without assuming any result. This roadmap does not authorize model
    evaluations, provider calls or spending.

@@ -15,11 +15,13 @@ from drift.historical.replay import (
     Json,
     Study,
     _json_object,
+    _ready_at,
     acknowledge,
     assert_isolated,
     close_time,
     constrained_passive,
     decision_time,
+    historical_mandate,
     normalize_proposal_json,
     open_time,
     prepare_review,
@@ -27,19 +29,46 @@ from drift.historical.replay import (
     require_settlement,
     research_brief,
     shown_context,
+    texts_for_window,
 )
 from drift.historical.select import Close, Window, select_windows
 from drift.historical.sources import (
     PriceBar,
     TextInput,
     alpaca_access_gap,
+    entitled_feeds,
+    filing_excerpt,
+    parse_alpaca_bars,
+    parse_alpaca_corporate_actions,
+    parse_alpaca_news,
     parse_yahoo_chart,
     restamp_companyfact,
 )
 from drift.manager.decide import citation_time
-from drift.manager.models import ExitCondition, InvestmentProposal
-from drift.manager.service import ManagerError, PortfolioManager
-from drift.prospective.config import START, UNIVERSE
+from drift.manager.evidence_validity import CitationRow, citation_refusal
+from drift.manager.models import (
+    REQUIRED_CONTEXT_LIMITATIONS,
+    REQUIRED_PACKET_LIMITATIONS,
+    EvidenceItem,
+    ExitCondition,
+    InvestmentProposal,
+    PortfolioContext,
+    ResearchPacket,
+    SimulationSession,
+)
+from drift.manager.service import (
+    ManagerError,
+    PortfolioManager,
+    _next_trade_observation,
+)
+from drift.memory.recorder import deterministic_memory_uuid7
+from drift.prospective.config import (
+    EVIDENCE_AGE_HOURS,
+    START,
+    UNIVERSE,
+    instruments,
+    mandate,
+)
 
 WARMUP = date(2024, 6, 3)
 FIRST = date(2024, 6, 4)
@@ -49,6 +78,10 @@ SETTLE = date(2024, 6, 6)
 
 def test_prospective_calendar_is_unchanged() -> None:
     assert START == date(2026, 11, 27)
+    assert mandate().citation_policy == "uniform_age"
+    assert mandate().max_evidence_age_hours == EVIDENCE_AGE_HOURS
+    assert historical_mandate().citation_policy == "research"
+    assert historical_mandate().max_evidence_age_hours == EVIDENCE_AGE_HOURS
 
 
 def test_alpaca_401_is_a_gap_not_a_price() -> None:
@@ -185,7 +218,7 @@ def test_research_brief_keeps_stale_statements_out_of_citations() -> None:
     )
     assert "change 1.00 percent" in text
     assert "hist:fixture:AAPL:close:2024-06-04" in text
-    assert "background, not citable" in text
+    assert "citable until superseded" in text
     assert "Cash 10000." in text
 
 
@@ -265,7 +298,7 @@ def test_research_brief_reports_trend_and_earnings() -> None:
     assert "price over EPS 25.00" in text
     assert "period end 2022-12-31" in text.split("latest statement", 1)[1]
     assert "growth not computed" in text
-    assert "background, not citable" in text
+    assert "citable until superseded" in text
 
 
 def test_price_value_marks_shares_without_calling_them_total_return() -> None:
@@ -335,7 +368,7 @@ def test_a_later_availability_time_does_not_refresh_old_evidence() -> None:
         },
         as_of,
     )
-    assert "background, not citable" in text
+    assert "stale, not citable" in text
 
 
 def test_duplicate_proposal_keys_are_refused() -> None:
@@ -410,9 +443,11 @@ def test_citation_label_uses_the_full_336_hour_cutoff() -> None:
         },
         as_of,
     )
-    assert "hist:fixture:AAPL:close:fresh is 336 hours old, citable." in text
-    assert "hist:fixture:JNJ:close:fresh is 1 hour old, citable." in text
-    assert "MSFT latest filing is 336 hours old, background, not citable" in text
+    assert (
+        "hist:fixture:AAPL:close:fresh is 336 hours old, fresh price, citable." in text
+    )
+    assert "hist:fixture:JNJ:close:fresh is 1 hour old, fresh price, citable." in text
+    assert "MSFT latest filing is 336 hours old, stale, not citable" in text
 
 
 def test_a_post_decision_fact_waits_for_the_next_open(tmp_path: Path) -> None:
@@ -516,6 +551,575 @@ def test_yahoo_parser_uses_the_quote_close() -> None:
     assert rows[0].open_price == "10"
     assert rows[0].close_price == "10.01"
     assert rows[0].source_label == "yahoo-chart-v8"
+
+
+def test_alpaca_bar_uses_the_new_york_date_and_raw_cents() -> None:
+    payload = {
+        "bars": {
+            "AAPL": [
+                {
+                    "t": "2024-11-01T04:00:00Z",
+                    "o": 220.965,
+                    "c": 222.91,
+                    "v": 10,
+                }
+            ]
+        }
+    }
+    rows = parse_alpaca_bars("AAPL", payload, "sip")
+    assert rows[0].day == date(2024, 11, 1)
+    assert rows[0].open_price == "220.97"
+    assert rows[0].close_price == "222.91"
+    assert rows[0].source_label == "alpaca-bars-v2-sip-raw"
+
+
+def test_alpaca_actions_and_news_keep_their_labels() -> None:
+    splits, dividends = parse_alpaca_corporate_actions(
+        {
+            "corporate_actions": {
+                "forward_splits": [{"ex_date": "2020-08-31", "symbol": "AAPL"}],
+                "cash_dividends": [{"ex_date": "2020-08-07", "symbol": "AAPL"}],
+            }
+        }
+    )
+    assert splits == frozenset({date(2020, 8, 31)})
+    assert dividends == 1
+    rows = parse_alpaca_news(
+        {
+            "news": [
+                {
+                    "id": 7,
+                    "headline": "Apple event",
+                    "summary": "A product note.",
+                    "created_at": "2026-11-26T11:32:14Z",
+                    "symbols": ["AAPL", "UNKNOWN"],
+                }
+            ]
+        },
+        frozenset({"AAPL", "MSFT"}),
+    )
+    assert len(rows) == 1
+    assert rows[0].symbol == "AAPL"
+    assert rows[0].source_label == "alpaca-news"
+    assert rows[0].evidence_id == "alpaca:news:7:AAPL"
+    revised = parse_alpaca_news(
+        {
+            "news": [
+                {
+                    "id": 8,
+                    "headline": "Revised",
+                    "created_at": "2026-11-26T11:00:00Z",
+                    "updated_at": "2026-11-26T15:00:00Z",
+                    "symbols": ["AAPL"],
+                }
+            ]
+        },
+        frozenset({"AAPL"}),
+    )
+    assert revised[0].observed_at == datetime(2026, 11, 26, 11, tzinfo=UTC)
+    assert revised[0].available_at == datetime(2026, 11, 26, 15, tzinfo=UTC)
+
+
+def test_filing_excerpt_prefers_the_event_item() -> None:
+    body = (
+        "<html><body><p>Cover page</p>"
+        "<p>Item 2.02 Results of Operations</p></body></html>"
+    )
+    assert filing_excerpt(body, limit=40).startswith("Item 2.02 Results")
+
+
+def test_research_policy_distinguishes_evidence_class() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    old = datetime(2024, 1, 2, tzinfo=UTC)
+    close = _row("hist:old-close", "observation", "close", old)
+    news = _row("alpaca:news:1:AAPL", "news", "alpaca-news", old)
+    original = _row(
+        "sec:fact:AAPL:Revenues:2023-09-30:2022-10-01:2023-11-03:10-K:USD",
+        "fundamental",
+        "sec-companyfacts",
+        datetime(2023, 11, 3, tzinfo=UTC),
+    )
+    amended = _row(
+        "sec:fact:AAPL:Revenues:2023-09-30:2022-10-01:2024-02-02:10-K/A:USD",
+        "fundamental",
+        "sec-companyfacts",
+        datetime(2024, 2, 2, tzinfo=UTC),
+    )
+    withdrawn = CitationRow(
+        evidence_id="sec:fact:AAPL:Assets:2023-09-30:2023-11-03:10-K:USD",
+        kind="fundamental",
+        source_label="sec-companyfacts",
+        summary="Assets 5 USD period end 2023-09-30.",
+        limitations=("withdrawn filing",),
+        observed_at=old,
+        available_at=old,
+        symbol="AAPL",
+    )
+    filing = CitationRow(
+        evidence_id="sec:filing:0001",
+        kind="news",
+        source_label="sec-submissions",
+        summary="10-K accession 0001 report 2023-09-30.",
+        limitations=("SEC submissions row",),
+        observed_at=datetime(2023, 11, 3, tzinfo=UTC),
+        available_at=datetime(2023, 11, 3, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    amendment = CitationRow(
+        evidence_id="sec:filing:0002",
+        kind="news",
+        source_label="sec-filing-text",
+        summary="10-K/A accession 0002 report 2023-09-30.",
+        limitations=("excerpt is not the full filing",),
+        observed_at=datetime(2024, 2, 2, tzinfo=UTC),
+        available_at=datetime(2024, 2, 2, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    rows = (close, news, original, amended, withdrawn, filing, amendment)
+    assert citation_refusal(close, as_of, rows, policy="uniform_age", max_age_hours=336)
+    assert (
+        citation_refusal(close, as_of, rows, policy="research", max_age_hours=336)
+        is None
+    )
+    assert citation_refusal(news, as_of, rows, policy="research", max_age_hours=336)
+    assert (
+        citation_refusal(amended, as_of, rows, policy="research", max_age_hours=336)
+        is None
+    )
+    superseded = citation_refusal(
+        original, as_of, rows, policy="research", max_age_hours=336
+    )
+    assert superseded is not None
+    assert superseded.startswith("superseded_evidence")
+    withdrawn_reason = citation_refusal(
+        withdrawn, as_of, rows, policy="research", max_age_hours=336
+    )
+    assert withdrawn_reason is not None
+    assert withdrawn_reason.startswith("withdrawn_evidence")
+    filing_reason = citation_refusal(
+        filing, as_of, rows, policy="research", max_age_hours=336
+    )
+    assert filing_reason is not None
+    assert filing_reason.startswith("superseded_evidence")
+    assert (
+        citation_refusal(amendment, as_of, rows, policy="research", max_age_hours=336)
+        is None
+    )
+
+
+def test_another_issuers_amendment_does_not_supersede() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    original = CitationRow(
+        evidence_id="sec:filing:aapl",
+        kind="news",
+        source_label="sec-submissions",
+        summary="10-Q accession aapl report 2024-03-30.",
+        limitations=("SEC submissions row",),
+        observed_at=datetime(2024, 5, 1, tzinfo=UTC),
+        available_at=datetime(2024, 5, 1, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    other = CitationRow(
+        evidence_id="sec:filing:msft",
+        kind="news",
+        source_label="sec-filing-text",
+        summary="10-Q/A accession msft report 2024-03-30.",
+        limitations=("excerpt is not the full filing",),
+        observed_at=datetime(2024, 5, 20, tzinfo=UTC),
+        available_at=datetime(2024, 5, 20, tzinfo=UTC),
+        symbol="MSFT",
+    )
+    refusal = citation_refusal(
+        original, as_of, (original, other), policy="research", max_age_hours=336
+    )
+    assert refusal is None
+
+
+def test_two_original_filings_from_one_issuer_both_stay_citable() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    first = CitationRow(
+        evidence_id="sec:filing:one",
+        kind="news",
+        source_label="sec-submissions",
+        summary="8-K accession one report 2024-04-17.",
+        limitations=("SEC submissions row",),
+        observed_at=datetime(2024, 4, 17, 20, tzinfo=UTC),
+        available_at=datetime(2024, 4, 17, 20, tzinfo=UTC),
+        symbol="MSFT",
+    )
+    second = CitationRow(
+        evidence_id="sec:filing:two",
+        kind="news",
+        source_label="sec-submissions",
+        summary="8-K accession two report 2024-04-17.",
+        limitations=("SEC submissions row",),
+        observed_at=datetime(2024, 5, 1, 20, tzinfo=UTC),
+        available_at=datetime(2024, 5, 1, 20, tzinfo=UTC),
+        symbol="MSFT",
+    )
+    refusal = citation_refusal(
+        first, as_of, (first, second), policy="research", max_age_hours=336
+    )
+    assert refusal is None
+
+
+def test_a_different_period_start_does_not_replace_the_fact() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    quarter = _row(
+        "sec:fact:AAPL:Revenues:2024-03-30:2024-01-01:2024-05-02:10-Q:USD",
+        "fundamental",
+        "sec-companyfacts",
+        datetime(2024, 5, 2, tzinfo=UTC),
+    )
+    year = _row(
+        "sec:fact:AAPL:Revenues:2024-03-30:2023-04-01:2024-05-03:10-Q:USD",
+        "fundamental",
+        "sec-companyfacts",
+        datetime(2024, 5, 3, tzinfo=UTC),
+    )
+    refusal = citation_refusal(
+        quarter, as_of, (quarter, year), policy="research", max_age_hours=336
+    )
+    assert refusal is None
+
+
+def test_headlines_do_not_crowd_out_a_current_filing() -> None:
+    window = Window(
+        regime="between",
+        warmup_day=date(2024, 6, 3),
+        decision_days=(date(2024, 6, 4),),
+        settlement_day=date(2024, 6, 5),
+        threshold_index=0,
+        total_return=Decimal("0"),
+        max_drawdown=Decimal("0"),
+        max_runup=Decimal("0"),
+    )
+    filing = TextInput(
+        evidence_id="sec:filing:current",
+        symbol="AAPL",
+        kind="news",
+        observed_at=datetime(2024, 5, 1, tzinfo=UTC),
+        summary="10-Q accession current report 2024-03-30.",
+        source_label="sec-submissions",
+        limitations=("SEC submissions row",),
+    )
+    headlines = tuple(
+        TextInput(
+            evidence_id=f"alpaca:news:{index}:AAPL",
+            symbol="AAPL",
+            kind="news",
+            observed_at=datetime(2024, 5, 20 + index, tzinfo=UTC),
+            summary=f"headline {index}",
+            source_label="alpaca-news",
+            limitations=("headline",),
+        )
+        for index in range(3)
+    )
+    kept = texts_for_window((filing, *headlines), window)
+    assert any(item.evidence_id == "sec:filing:current" for item in kept)
+
+
+def test_a_failed_sip_download_still_leaves_iex_entitled() -> None:
+    assert entitled_feeds({"sip": 200, "iex": 200}) == ("sip", "iex")
+    assert entitled_feeds({"sip": 401, "iex": 200}) == ("iex",)
+
+
+def test_uniform_age_still_rejects_a_fresh_withdrawn_filing() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    row = CitationRow(
+        evidence_id="sec:filing:withdrawn",
+        kind="news",
+        source_label="sec-submissions",
+        summary="Withdrawn filing accession x report 2024-06-04.",
+        limitations=("withdrawn filing",),
+        observed_at=datetime(2024, 6, 4, 21, tzinfo=UTC),
+        available_at=datetime(2024, 6, 4, 21, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    refusal = citation_refusal(
+        row, as_of, (row,), policy="uniform_age", max_age_hours=336
+    )
+    assert refusal is not None
+    assert refusal.startswith("withdrawn_evidence")
+
+
+def test_one_amendment_does_not_retire_two_originals() -> None:
+    as_of = datetime(2024, 6, 4, 22, tzinfo=UTC)
+    first = _filing("one", datetime(2024, 4, 17, 20, tzinfo=UTC), "8-K")
+    second = _filing("two", datetime(2024, 4, 18, 20, tzinfo=UTC), "8-K")
+    amendment = _filing("amend", datetime(2024, 5, 1, 20, tzinfo=UTC), "8-K/A")
+    rows = (first, second, amendment)
+    assert (
+        citation_refusal(first, as_of, rows, policy="research", max_age_hours=336)
+        is None
+    )
+    assert (
+        citation_refusal(second, as_of, rows, policy="research", max_age_hours=336)
+        is None
+    )
+
+
+def test_a_legacy_fact_id_still_matches_its_period() -> None:
+    as_of = datetime(2019, 11, 1, 22, tzinfo=UTC)
+    legacy = CitationRow(
+        evidence_id=("sec:fact:AAPL:Revenues:2017-12-30:2019-01-30:10-Q:USD"),
+        kind="fundamental",
+        source_label="sec-companyfacts",
+        summary=(
+            "Revenues 1 USD period end 2017-12-30 period start 2017-10-01 "
+            "form 10-Q filed 2019-01-30."
+        ),
+        limitations=("fixture",),
+        observed_at=datetime(2019, 1, 30, 23, 59, tzinfo=UTC),
+        available_at=datetime(2019, 1, 30, 23, 59, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    same = CitationRow(
+        evidence_id=(
+            "sec:fact:AAPL:Revenues:2017-12-30:2017-10-01:2019-10-31:10-K:USD"
+        ),
+        kind="fundamental",
+        source_label="sec-companyfacts",
+        summary=(
+            "Revenues 2 USD period end 2017-12-30 period start 2017-10-01 "
+            "form 10-K filed 2019-10-31."
+        ),
+        limitations=("fixture",),
+        observed_at=datetime(2019, 10, 31, 23, 59, tzinfo=UTC),
+        available_at=datetime(2019, 10, 31, 23, 59, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    other_period = CitationRow(
+        evidence_id=(
+            "sec:fact:AAPL:Revenues:2017-12-30:2017-07-01:2019-10-31:10-K:USD"
+        ),
+        kind="fundamental",
+        source_label="sec-companyfacts",
+        summary=(
+            "Revenues 9 USD period end 2017-12-30 period start 2017-07-01 "
+            "form 10-K filed 2019-10-31."
+        ),
+        limitations=("fixture",),
+        observed_at=datetime(2019, 10, 31, 23, 59, tzinfo=UTC),
+        available_at=datetime(2019, 10, 31, 23, 59, tzinfo=UTC),
+        symbol="AAPL",
+    )
+    replaced = citation_refusal(
+        legacy, as_of, (legacy, same), policy="research", max_age_hours=336
+    )
+    assert replaced is not None
+    assert replaced.startswith("superseded_evidence")
+    kept = citation_refusal(
+        legacy,
+        as_of,
+        (legacy, other_period),
+        policy="research",
+        max_age_hours=336,
+    )
+    assert kept is None
+
+
+def test_a_weekend_revision_is_ready_at_the_next_open() -> None:
+    window = Window(
+        regime="bullish",
+        warmup_day=date(2024, 6, 6),
+        decision_days=(date(2024, 6, 7), date(2024, 6, 10)),
+        settlement_day=date(2024, 6, 11),
+        threshold_index=0,
+        total_return=Decimal("0"),
+        max_drawdown=Decimal("0"),
+        max_runup=Decimal("0"),
+    )
+    item = TextInput(
+        evidence_id="alpaca:news:weekend:AAPL",
+        symbol="AAPL",
+        kind="news",
+        observed_at=datetime(2024, 6, 7, 15, tzinfo=UTC),
+        available_at=datetime(2024, 6, 9, 16, tzinfo=UTC),
+        summary="Revised headline.",
+        source_label="alpaca-news",
+        limitations=("headline",),
+    )
+    assert _ready_at(item, window) == open_time(date(2024, 6, 10))
+
+
+def _filing(name: str, stamp: datetime, form: str) -> CitationRow:
+    return CitationRow(
+        evidence_id=f"sec:filing:{name}",
+        kind="news",
+        source_label="sec-submissions",
+        summary=f"{form} accession {name} report 2024-04-17.",
+        limitations=("SEC submissions row",),
+        observed_at=stamp,
+        available_at=stamp,
+        symbol="MSFT",
+    )
+
+
+def test_research_policy_does_not_freshen_an_old_fill() -> None:
+    decision_at = datetime(2024, 1, 2, 22, tzinfo=UTC)
+    trade_at = datetime(2024, 1, 3, 14, 30, tzinfo=UTC)
+    as_of = datetime(2024, 6, 5, 14, 30, tzinfo=UTC)
+    item = EvidenceItem.model_validate(
+        {
+            "evidence_id": "hist:fixture:AAPL:open:2024-01-03",
+            "kind": "observation",
+            "symbol": "AAPL",
+            "observed_at": trade_at,
+            "available_at": trade_at,
+            "limitations": ("fixture price",),
+            "summary": "Daily open 100 for AAPL.",
+            "source_label": "fixture",
+            "price": "100",
+            "price_role": "trade",
+        }
+    )
+    opened = datetime(2024, 6, 4, 13, 30, tzinfo=UTC)
+    packet = ResearchPacket(
+        instruments=instruments(),
+        sessions=(
+            _session(date(2024, 6, 4), opened),
+            _session(date(2024, 6, 5), datetime(2024, 6, 5, 13, 30, tzinfo=UTC)),
+        ),
+        evidence=(item,),
+        portfolio_context=PortfolioContext(
+            as_of=opened,
+            cash="10000",
+            positions=(),
+            limitations=REQUIRED_CONTEXT_LIMITATIONS,
+        ),
+        limitations=REQUIRED_PACKET_LIMITATIONS,
+    )
+    found = _next_trade_observation(
+        packet,
+        historical_mandate(),
+        symbol="AAPL",
+        decision_at=decision_at,
+        as_of=as_of,
+        used=set(),
+    )
+    assert found is not None
+    _chosen, refusal = found
+    assert refusal is not None
+    assert refusal.startswith("stale_evidence")
+
+
+def test_historical_book_rejects_superseded_and_accepts_history(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "historical"
+    base, window = _study()
+    old_close = date(2024, 4, 1)
+    bars = list(base.bars)
+    bars.append(
+        PriceBar(
+            symbol="AAPL",
+            day=old_close,
+            open_price="90",
+            close_price="91",
+            volume="12",
+            source_label="fixture",
+        )
+    )
+    original = "sec:fact:AAPL:Revenues:2023-09-30:2022-10-01:2023-11-03:10-K:USD"
+    amended = "sec:fact:AAPL:Revenues:2023-09-30:2022-10-01:2024-02-02:10-K/A:USD"
+    study = Study(
+        bars=tuple(bars),
+        texts=(
+            _fact(
+                original,
+                datetime(2023, 11, 3, 23, 59, tzinfo=ZoneInfo("America/New_York")),
+            ),
+            _fact(
+                amended,
+                datetime(2024, 2, 2, 23, 59, tzinfo=ZoneInfo("America/New_York")),
+            ),
+        ),
+        benchmark_levels=base.benchmark_levels,
+        benchmark_kind=base.benchmark_kind,
+        benchmark_limitation=base.benchmark_limitation,
+        price_limitation=base.price_limitation,
+    )
+    prepare_review(state, study, window, book="nomemory", model="terra")
+    root = state / "bullish" / "nomemory" / "terra"
+    context = json.loads((root / "context.json").read_text())
+    ids = _ids(context)
+    assert any(item.endswith("AAPL:close:2024-04-01") for item in ids)
+    assert original in ids
+    assert amended in ids
+    manager = PortfolioManager.recover(root / "book.sqlite")
+    receipt = json.loads((root / "receipt.json").read_text())
+    rejected = manager.propose(_cited(receipt, original, "superseded"))
+    assert isinstance(rejected, dict)
+    assert rejected["status"] == "rejected"
+    reasons = rejected["reasons"]
+    assert isinstance(reasons, list)
+    assert any(str(reason).startswith("superseded_evidence") for reason in reasons)
+    accepted = manager.propose(_cited(receipt, amended, "current-fact"))
+    assert isinstance(accepted, dict)
+    assert accepted["status"] == "accepted"
+    close_id = next(item for item in ids if item.endswith("AAPL:close:2024-04-01"))
+    historical = manager.propose(_cited(receipt, close_id, "old-close"))
+    assert isinstance(historical, dict)
+    assert historical["status"] == "accepted"
+
+
+def _row(evidence_id: str, kind: str, source: str, stamp: datetime) -> CitationRow:
+    summary = "Daily close 10." if kind == "observation" else "note"
+    return CitationRow(
+        evidence_id=evidence_id,
+        kind=kind,
+        source_label=source,
+        summary=summary,
+        limitations=("fixture",),
+        observed_at=stamp,
+        available_at=stamp,
+        symbol="AAPL",
+    )
+
+
+def _fact(evidence_id: str, observed: datetime) -> TextInput:
+    return TextInput(
+        evidence_id=evidence_id,
+        symbol="AAPL",
+        kind="fundamental",
+        observed_at=observed,
+        summary=(
+            "Revenues 10 USD period end 2023-09-30 period start 2022-10-01 "
+            "form 10-K filed 2023-11-03."
+        ),
+        source_label="sec-companyfacts",
+        limitations=("fixture fact",),
+    )
+
+
+def _cited(
+    receipt: dict[str, object], evidence_id: str, name: str
+) -> InvestmentProposal:
+    as_of = receipt["as_of"]
+    assert isinstance(as_of, str)
+    return InvestmentProposal(
+        proposal_id=deterministic_memory_uuid7(f"historical-test:{name}"),
+        as_of=datetime.fromisoformat(as_of),
+        action="buy",
+        symbol="AAPL",
+        quantity=1,
+        thesis="The cited row is the current evidence for AAPL.",
+        evidence_ids=(evidence_id,),
+        uncertainty="This does not establish an edge.",
+        allocation_reasoning="One share stays inside the local cash floor.",
+        exit_conditions=(ExitCondition(kind="price_below", threshold="90"),),
+        execution="simulation",
+        inference="scripted",
+    )
+
+
+def _session(day: date, opened: datetime) -> SimulationSession:
+    return SimulationSession(
+        local_date=day,
+        opened_at=opened,
+        closed_at=datetime(day.year, day.month, day.day, 23, 59, tzinfo=UTC),
+    )
 
 
 def _close_id(ids: list[str], symbol: str, day: date) -> str:

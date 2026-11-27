@@ -7,6 +7,7 @@ from fractions import Fraction
 from typing import Literal
 
 from drift.domain.evaluator_portfolio import decimal_context
+from drift.manager.evidence_validity import CitationRow, citation_refusal
 from drift.manager.models import (
     EvidenceItem,
     InvestmentProposal,
@@ -55,6 +56,19 @@ def citation_time(observed: datetime, available: datetime) -> datetime:
 
 def _within_age(as_of: datetime, available_at: datetime, hours: int) -> bool:
     return as_of - available_at <= timedelta(hours=hours)
+
+
+def _citation_row(item: EvidenceItem) -> CitationRow:
+    return CitationRow(
+        evidence_id=item.evidence_id,
+        kind=item.kind,
+        source_label=item.source_label,
+        summary=item.summary,
+        limitations=item.limitations,
+        observed_at=item.observed_at,
+        available_at=item.available_at,
+        symbol=item.symbol,
+    )
 
 
 def _exact_product(left: Decimal, right: Decimal) -> Decimal | None:
@@ -219,6 +233,7 @@ def decide_proposal(
         )
 
     evidence = {item.evidence_id: item for item in packet.evidence}
+    citation_rows = tuple(_citation_row(candidate) for candidate in packet.evidence)
     cited_items: list[EvidenceItem] = []
     cited_outcomes: list[RecordedOutcome] = []
     for evidence_id in proposal.evidence_ids:
@@ -243,14 +258,15 @@ def decide_proposal(
                     f"{evidence_id} is later than the decision time"
                 )
                 continue
-            if not _within_age(
+            refusal = citation_refusal(
+                _citation_row(item),
                 proposal.as_of,
-                citation_time(item.observed_at, item.available_at),
-                mandate.max_evidence_age_hours,
-            ):
-                reasons.append(
-                    f"stale_evidence: {evidence_id} is older than the configured age"
-                )
+                citation_rows,
+                policy=mandate.citation_policy,
+                max_age_hours=mandate.max_evidence_age_hours,
+            )
+            if refusal is not None:
+                reasons.append(refusal)
                 continue
             cited_items.append(item)
         if outcome is not None:
@@ -344,6 +360,8 @@ def decide_proposal(
         "unsupported_evidence:",
         "evidence_not_yet_available:",
         "stale_evidence:",
+        "superseded_evidence:",
+        "withdrawn_evidence:",
         "unsafe_",
     )
     rejected = any(reason.startswith(reject_prefixes) for reason in reasons)
