@@ -101,7 +101,8 @@ of 2021 and 2022 is not controlled.
 
 Sol's theses named closes, volumes, and the 336-hour cutoff. Terra's
 theses were shorter and usually said the recent observations were not
-enough. Both styles abstained except for the two accepted SPY buys.
+enough. Sol also proposed buying 12 AAPL shares. That proposal was
+rejected and did not fill. The only filled trades are the two SPY buys.
 Thesis quality here is a label, not a score.
 
 ## Failures
@@ -124,6 +125,21 @@ Thesis quality here is a label, not a score.
   narrative text. The action, size, and citations were not changed.
 - Known product gaps still apply: dividends are not credited, and the
   report often omits a mark when the request is outside the session.
+- The recorded books use 14:30 UTC as the open and 21:00 UTC as the
+  close. That is 9:30 a.m. and 4:00 p.m. New York in January and
+  February, and one hour later in April. The fill price is still the
+  Yahoo daily open, not a later intraday print. The open row also
+  carries the day's volume. The decision is at 22:00 UTC, after the
+  close row is ingested, so that volume is not a look-ahead at
+  decision time.
+- SEC company facts are placed at 21:00 UTC on the filed date. A filing
+  accepted after that clock can appear early. The accepted trades cited
+  prices, not those facts.
+- A missing benchmark row can make the selector treat the next
+  remaining row as the next session. These three windows had a
+  benchmark level on every selected date. Rerunning `prepare` after a
+  book exists is now refused, so a later index cannot be paired with
+  these ledgers.
 
 ## Commands
 

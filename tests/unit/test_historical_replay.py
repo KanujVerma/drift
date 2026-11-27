@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pytest
 
+from drift.historical.__main__ import refuse_frozen_relabel
 from drift.historical.replay import (
     Study,
     acknowledge,
@@ -15,11 +16,12 @@ from drift.historical.replay import (
     constrained_passive,
     decision_time,
     prepare_review,
+    require_settlement,
 )
 from drift.historical.select import Close, Window, select_windows
 from drift.historical.sources import PriceBar, alpaca_access_gap, parse_yahoo_chart
 from drift.manager.models import ExitCondition, InvestmentProposal
-from drift.manager.service import PortfolioManager
+from drift.manager.service import ManagerError, PortfolioManager
 from drift.prospective.config import START, UNIVERSE
 
 WARMUP = date(2024, 6, 3)
@@ -127,6 +129,22 @@ def test_constrained_passive_respects_the_position_cap() -> None:
     control = constrained_passive("100", "110")
     assert control["shares"] == "24"
     assert Decimal(control["spent"]) <= Decimal("2500")
+
+
+def test_settlement_refuses_a_trade_that_is_still_pending() -> None:
+    require_settlement({"results": [], "status": "idle"})
+    with pytest.raises(ManagerError, match="unfinished"):
+        require_settlement(
+            {"results": [{"status": "pending"}], "status": "pending"}
+        )
+
+
+def test_prepare_refuses_to_relabel_an_existing_book(tmp_path: Path) -> None:
+    ledger = tmp_path / "bullish" / "memory" / "terra"
+    ledger.mkdir(parents=True)
+    (ledger / "book.sqlite").write_bytes(b"")
+    with pytest.raises(ValueError, match="cannot be rewritten"):
+        refuse_frozen_relabel(tmp_path)
 
 
 def test_yahoo_parser_uses_the_quote_close() -> None:

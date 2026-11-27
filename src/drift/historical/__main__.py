@@ -85,8 +85,16 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def refuse_frozen_relabel(state: Path) -> None:
+    """Keep an existing book on the windows it was recorded against."""
+    if any(state.glob("*/*/*/book.sqlite")):
+        message = "historical criteria cannot be rewritten after a book exists"
+        raise ValueError(message)
+
+
 def prepare(state: Path) -> dict[str, object]:
     """Fetch inputs, select windows, and write the frozen criteria."""
+    refuse_frozen_relabel(state)
     state.mkdir(parents=True, exist_ok=True)
     _feed, alpaca_gaps = probe_alpaca()
     gaps = list(alpaca_gaps)

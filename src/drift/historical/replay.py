@@ -376,6 +376,19 @@ def _ingest_day(
     _ingest(manager, items, points)
 
 
+def require_settlement(outcome: Json) -> None:
+    """Refuse to close a window while a trade is still waiting for a fill."""
+    results = outcome.get("results") if isinstance(outcome, dict) else None
+    pending = isinstance(results, list) and any(
+        isinstance(row, dict) and row.get("status") == "pending" for row in results
+    )
+    status = outcome.get("status") if isinstance(outcome, dict) else None
+    if status in {"filled", "idle"} and not pending:
+        return
+    message = f"historical settlement left a trade unfinished: {outcome}"
+    raise ManagerError(message)
+
+
 def _settle(
     state: Path,
     study: Study,
@@ -387,7 +400,7 @@ def _settle(
     manager = PortfolioManager.recover(root / "book.sqlite")
     day = window.settlement_day
     _ingest_day(manager, study, window, day, roles=("open",))
-    manager.execute_pending(open_time(day))
+    require_settlement(manager.execute_pending(open_time(day)))
     _ingest_day(manager, study, window, day, roles=("close", "benchmark"))
     manager.mark(decision_time(day))
     _append_report(root, manager.report(decision_time(day)))
