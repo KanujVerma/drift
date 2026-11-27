@@ -134,9 +134,7 @@ def test_constrained_passive_respects_the_position_cap() -> None:
 def test_settlement_refuses_a_trade_that_is_still_pending() -> None:
     require_settlement({"results": [], "status": "idle"})
     with pytest.raises(ManagerError, match="unfinished"):
-        require_settlement(
-            {"results": [{"status": "pending"}], "status": "pending"}
-        )
+        require_settlement({"results": [{"status": "pending"}], "status": "pending"})
 
 
 def test_prepare_refuses_to_relabel_an_existing_book(tmp_path: Path) -> None:
