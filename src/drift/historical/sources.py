@@ -335,6 +335,12 @@ def benchmark_level(text: str) -> Decimal | None:
     return Decimal(parsed)
 
 
+def _filed_date_close(filed: str) -> datetime:
+    """End of the filed New York date. The acceptance clock is not in the row."""
+    day = date.fromisoformat(filed)
+    return datetime(day.year, day.month, day.day, 23, 59, tzinfo=NY)
+
+
 def _fact_row(symbol: str, concept: str, unit: str, row: object) -> TextInput | None:
     if not isinstance(row, dict):
         return None
@@ -350,7 +356,7 @@ def _fact_row(symbol: str, concept: str, unit: str, row: object) -> TextInput | 
         return None
     if isinstance(value, bool) or not isinstance(value, int | float | str):
         return None
-    observed = datetime.fromisoformat(f"{filed}T21:00:00+00:00")
+    observed = _filed_date_close(filed)
     return TextInput(
         evidence_id=f"sec:fact:{symbol}:{concept}:{end}:{filed}:{form}:{unit}",
         symbol=symbol,
@@ -361,7 +367,8 @@ def _fact_row(symbol: str, concept: str, unit: str, row: object) -> TextInput | 
         ),
         source_label="sec-companyfacts",
         limitations=(
-            "SEC companyfacts value placed at 21:00 UTC on the filed date; "
+            "SEC companyfacts value is available at the end of the filed "
+            "New York date because the acceptance clock is not in the row; "
             "the row may not say which period it is; not origin authentication",
         ),
     )
