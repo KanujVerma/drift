@@ -168,7 +168,7 @@ def prepare_review(
     day = window.decision_days[index]
     manager = _manager(state, study, window, book, model)
     if index > 0:
-        _ingest_day(manager, study, window, day, roles=("open",))
+        _ingest_day(manager, study, window, day, roles=("open", "text_open"))
         executed = manager.execute_pending(open_time(day))
         _expect_progress(executed)
     _ingest_day(manager, study, window, day, roles=("close", "text", "benchmark"))
@@ -393,8 +393,10 @@ def _ingest_day(
         items.extend(_price_items(study, day, "open"))
     if "close" in roles:
         items.extend(_price_items(study, day, "close"))
+    if "text_open" in roles:
+        items.extend(_texts_due(study, window, day, at_open=True))
     if "text" in roles:
-        items.extend(_texts_due(study, window, day))
+        items.extend(_texts_due(study, window, day, at_open=False))
     if "benchmark" in roles:
         level = _level(study, day)
         if level is None:
@@ -534,18 +536,19 @@ def text_available(observed: datetime, window: Window) -> datetime:
     return observed
 
 
-def _texts_due(study: Study, window: Window, day: date) -> list[EvidenceItem]:
-    earlier = [item for item in window.decision_days if item < day]
-    if earlier:
-        prior = decision_time(earlier[-1])
-    else:
-        prior = open_time(window.decision_days[0])
+def _texts_due(
+    study: Study, window: Window, day: date, *, at_open: bool
+) -> list[EvidenceItem]:
+    """Facts due at the open are ingested before a fill at that same time."""
+    opened = open_time(day)
     due: list[EvidenceItem] = []
     for text in study.texts:
         if not _symbol_known(text.symbol):
             continue
         available = text_available(text.observed_at, window)
-        if prior < available <= decision_time(day):
+        if at_open and available == opened:
+            due.append(_text_item(text, available))
+        elif not at_open and opened < available <= decision_time(day):
             due.append(_text_item(text, available))
     return due
 
@@ -761,15 +764,17 @@ def research_brief(context: Json, as_of: datetime) -> str:
     rows = evidence if isinstance(evidence, list) else []
     closes: dict[str, list[tuple[datetime, str, str, str]]] = {}
     statements: dict[str, tuple[tuple[str, datetime], str]] = {}
-    facts: dict[str, dict[str, dict[str, tuple[datetime, Decimal]]]] = {}
+    facts: dict[str, dict[str, dict[str, tuple[datetime, Decimal, str | None]]]] = {}
     filings: dict[str, tuple[datetime, str]] = {}
     for item in rows:
         if not isinstance(item, dict):
             continue
         symbol = item.get("symbol")
-        stamp = _stamp(item.get("available_at"))
-        if not isinstance(symbol, str) or stamp is None or stamp > as_of:
+        available = _stamp(item.get("available_at"))
+        observed = _stamp(item.get("observed_at"))
+        if not isinstance(symbol, str) or available is None or available > as_of:
             continue
+        stamp = available if observed is None else min(observed, available)
         kind = item.get("kind")
         summary = item.get("summary")
         summary_text = summary if isinstance(summary, str) else ""
@@ -845,6 +850,7 @@ def research_brief(context: Json, as_of: datetime) -> str:
 _FACT = re.compile(
     r"^(?P<concept>[A-Za-z0-9]+)\s+(?P<value>-?[0-9]+(?:\.[0-9]+)?)\s+"
     r"\S+\s+period end\s+(?P<end>\d{4}-\d{2}-\d{2})"
+    r"(?:\s+period start\s+(?P<start>\d{4}-\d{2}-\d{2}))?"
 )
 _VOLUME = re.compile(r"Volume\s+([0-9]+)")
 
@@ -864,7 +870,7 @@ def _percent_change(first: Decimal, last: Decimal) -> str:
 
 
 def _keep_fact(
-    facts: dict[str, dict[str, dict[str, tuple[datetime, Decimal]]]],
+    facts: dict[str, dict[str, dict[str, tuple[datetime, Decimal, str | None]]]],
     symbol: str,
     stamp: datetime,
     summary: str,
@@ -886,21 +892,31 @@ def _keep_fact(
     by_period = by_symbol.setdefault(family, {})
     current = by_period.get(period)
     if current is None or stamp > current[0]:
-        by_period[period] = (stamp, value)
+        by_period[period] = (stamp, value, match.group("start"))
 
 
 def _fact_lines(
     symbol: str,
     last_price: Decimal,
-    families: dict[str, dict[str, tuple[datetime, Decimal]]],
+    families: dict[str, dict[str, tuple[datetime, Decimal, str | None]]],
     as_of: datetime,
 ) -> list[str]:
     lines: list[str] = []
     eps = _latest_pair(families.get("eps", {}))
     revenue = _latest_pair(families.get("revenue", {}))
     if eps is not None:
-        (old_end, _old_stamp, old_value), (new_end, new_stamp, new_value) = eps
-        growth = _percent_change(old_value, new_value) if old_end != new_end else "n/a"
+        (
+            (old_end, _old_stamp, old_value, old_start),
+            (
+                new_end,
+                new_stamp,
+                new_value,
+                new_start,
+            ),
+        ) = eps
+        growth = _matched_growth(
+            old_start, old_end, old_value, new_start, new_end, new_value
+        )
         age = _age_hours(as_of, new_stamp)
         label = _citation_label(as_of, new_stamp, background=True)
         multiple = "not computed"
@@ -912,20 +928,57 @@ def _fact_lines(
             f"The EPS is {_age_phrase(age)} old, {label}."
         )
     if revenue is not None:
-        (old_end, _old_stamp, old_value), (new_end, _new_stamp, new_value) = revenue
-        growth = _percent_change(old_value, new_value) if old_end != new_end else "n/a"
+        (
+            (old_end, _old_stamp, old_value, old_start),
+            (
+                new_end,
+                _new_stamp,
+                new_value,
+                new_start,
+            ),
+        ) = revenue
+        growth = _matched_growth(
+            old_start, old_end, old_value, new_start, new_end, new_value
+        )
         lines.append(
             f"{symbol} revenue {new_value} period end {new_end}, growth {growth}."
         )
     return lines
 
 
+def _matched_growth(
+    old_start: str | None,
+    old_end: str,
+    old_value: Decimal,
+    new_start: str | None,
+    new_end: str,
+    new_value: Decimal,
+) -> str:
+    """Compare two figures only when they cover the same number of days."""
+    if old_end == new_end:
+        return "n/a"
+    old_days = _span_days(old_start, old_end)
+    new_days = _span_days(new_start, new_end)
+    if old_days is None or old_days != new_days:
+        return "not computed"
+    return _percent_change(old_value, new_value)
+
+
+def _span_days(start: str | None, end: str) -> int | None:
+    if start is None:
+        return None
+    try:
+        return (date.fromisoformat(end) - date.fromisoformat(start)).days
+    except ValueError:
+        return None
+
+
 def _latest_pair(
-    periods: dict[str, tuple[datetime, Decimal]],
+    periods: dict[str, tuple[datetime, Decimal, str | None]],
 ) -> (
     tuple[
-        tuple[str, datetime, Decimal],
-        tuple[str, datetime, Decimal],
+        tuple[str, datetime, Decimal, str | None],
+        tuple[str, datetime, Decimal, str | None],
     ]
     | None
 ):
@@ -934,11 +987,11 @@ def _latest_pair(
     ordered = sorted(periods)
     latest = ordered[-1]
     prior = ordered[-2] if len(ordered) > 1 else latest
-    prior_stamp, prior_value = periods[prior]
-    latest_stamp, latest_value = periods[latest]
+    prior_stamp, prior_value, prior_start = periods[prior]
+    latest_stamp, latest_value, latest_start = periods[latest]
     return (
-        (prior, prior_stamp, prior_value),
-        (latest, latest_stamp, latest_value),
+        (prior, prior_stamp, prior_value, prior_start),
+        (latest, latest_stamp, latest_value, latest_start),
     )
 
 
@@ -1226,12 +1279,22 @@ def normalize_proposal_json(raw: str) -> str:
     return json.dumps(loaded)
 
 
+def _pairs(pairs: list[tuple[str, Json]]) -> dict[str, Json]:
+    found: dict[str, Json] = {}
+    for key, value in pairs:
+        if key in found:
+            message = f"proposal repeats {key}"
+            raise ValueError(message)
+        found[key] = value
+    return found
+
+
 def _json_object(raw: str) -> str:
     text = raw.strip()
     if text.startswith("```"):
         lines = [line for line in text.splitlines() if not line.startswith("```")]
         text = "\n".join(lines).strip()
-    loaded = json.loads(text)
+    loaded = json.loads(text, object_pairs_hook=_pairs)
     if not isinstance(loaded, dict):
         message = "proposal is not a JSON object"
         raise ValueError(message)

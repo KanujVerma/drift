@@ -46,6 +46,13 @@ class Decision:
         self.price_evidence_id = price_evidence_id
 
 
+def citation_time(observed: datetime, available: datetime) -> datetime:
+    """Age from the earlier clock. A later availability time cannot refresh it."""
+    if observed <= available:
+        return observed
+    return available
+
+
 def _within_age(as_of: datetime, available_at: datetime, hours: int) -> bool:
     return as_of - available_at <= timedelta(hours=hours)
 
@@ -237,7 +244,9 @@ def decide_proposal(
                 )
                 continue
             if not _within_age(
-                proposal.as_of, item.available_at, mandate.max_evidence_age_hours
+                proposal.as_of,
+                citation_time(item.observed_at, item.available_at),
+                mandate.max_evidence_age_hours,
             ):
                 reasons.append(
                     f"stale_evidence: {evidence_id} is older than the configured age"

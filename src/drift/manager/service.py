@@ -49,6 +49,7 @@ from drift.manager.book import (
 from drift.manager.decide import (
     Decision,
     RecordedOutcome,
+    citation_time,
     decide_proposal,
     fill_limit_reasons,
 )
@@ -1207,7 +1208,8 @@ def _close_observation(
     fresh = [
         item
         for item in matches
-        if as_of - item.available_at <= timedelta(hours=mandate.max_evidence_age_hours)
+        if as_of - citation_time(item.observed_at, item.available_at)
+        <= timedelta(hours=mandate.max_evidence_age_hours)
     ]
     if not fresh:
         return (
@@ -1243,9 +1245,8 @@ def _observation_refusal(
         return (
             "evidence_not_yet_available: the observation is later than the reflection"
         )
-    if as_of - observation.available_at > timedelta(
-        hours=mandate.max_evidence_age_hours
-    ):
+    aged = citation_time(observation.observed_at, observation.available_at)
+    if as_of - aged > timedelta(hours=mandate.max_evidence_age_hours):
         return "stale_evidence: the observation is older than the configured age"
     return None
 
@@ -1253,6 +1254,7 @@ def _observation_refusal(
 def _evidence_context(item: EvidenceItem) -> Json:
     return {
         "available_at": item.available_at.isoformat(),
+        "observed_at": item.observed_at.isoformat(),
         "evidence_id": item.evidence_id,
         "integrity_hash": evidence_hash(item),
         "kind": item.kind,

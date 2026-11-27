@@ -335,6 +335,21 @@ def benchmark_level(text: str) -> Decimal | None:
     return Decimal(parsed)
 
 
+def restamp_companyfact(observed: datetime, source_label: str) -> datetime:
+    """Replace a cached 21:00 UTC companyfacts stamp with the filed-date close.
+
+    Older caches placed the value at 21:00 UTC, which can fall before the
+    end of the filed New York date. Filings with an acceptance clock are left
+    alone.
+    """
+    if source_label != "sec-companyfacts":
+        return observed
+    utc = observed.astimezone(UTC)
+    if utc.hour == 21 and utc.minute == 0 and utc.second == 0 and utc.microsecond == 0:
+        return _filed_date_close(utc.date().isoformat())
+    return observed
+
+
 def _filed_date_close(filed: str) -> datetime:
     """End of the filed New York date. The acceptance clock is not in the row."""
     day = date.fromisoformat(filed)
@@ -348,6 +363,8 @@ def _fact_row(symbol: str, concept: str, unit: str, row: object) -> TextInput | 
     filed = row.get("filed")
     form = row.get("form")
     value = row.get("val")
+    start = row.get("start")
+    start_text = f" period start {start}" if isinstance(start, str) else ""
     if (
         not isinstance(end, str)
         or not isinstance(filed, str)
@@ -363,7 +380,8 @@ def _fact_row(symbol: str, concept: str, unit: str, row: object) -> TextInput | 
         kind="fundamental",
         observed_at=observed,
         summary=(
-            f"{concept} {value} {unit} period end {end} form {form} filed {filed}."
+            f"{concept} {value} {unit} period end {end}{start_text} "
+            f"form {form} filed {filed}."
         ),
         source_label="sec-companyfacts",
         limitations=(

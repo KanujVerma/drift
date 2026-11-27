@@ -14,6 +14,7 @@ from drift.historical.__main__ import refuse_frozen_relabel
 from drift.historical.replay import (
     Json,
     Study,
+    _json_object,
     acknowledge,
     assert_isolated,
     close_time,
@@ -33,7 +34,9 @@ from drift.historical.sources import (
     TextInput,
     alpaca_access_gap,
     parse_yahoo_chart,
+    restamp_companyfact,
 )
+from drift.manager.decide import citation_time
 from drift.manager.models import ExitCondition, InvestmentProposal
 from drift.manager.service import ManagerError, PortfolioManager
 from drift.prospective.config import START, UNIVERSE
@@ -215,8 +218,8 @@ def test_research_brief_reports_trend_and_earnings() -> None:
                         "evidence_id": "sec:fact:AAPL:eps:2023",
                         "kind": "fundamental",
                         "summary": (
-                            "EarningsPerShareDiluted 2 USD period end 2023-09-30 "
-                            "form 10-K filed 2024-01-01."
+                            "EarningsPerShareDiluted 2 USD period end 2021-12-31 "
+                            "period start 2021-01-01 form 10-K filed 2024-01-01."
                         ),
                         "symbol": "AAPL",
                     },
@@ -231,12 +234,22 @@ def test_research_brief_reports_trend_and_earnings() -> None:
                         "symbol": "AAPL",
                     },
                     {
+                        "available_at": "2024-02-15T04:59:00+00:00",
+                        "evidence_id": "sec:fact:AAPL:quarter",
+                        "kind": "fundamental",
+                        "summary": (
+                            "Revenues 2 USD period end 2020-03-31 "
+                            "period start 2020-01-01 form 10-Q filed 2024-02-15."
+                        ),
+                        "symbol": "AAPL",
+                    },
+                    {
                         "available_at": "2024-02-01T04:59:00+00:00",
                         "evidence_id": "sec:fact:AAPL:eps:2024",
                         "kind": "fundamental",
                         "summary": (
-                            "EarningsPerShareDiluted 4 USD period end 2024-09-30 "
-                            "form 10-K filed 2024-02-01."
+                            "EarningsPerShareDiluted 4 USD period end 2022-12-31 "
+                            "period start 2022-01-01 form 10-K filed 2024-02-01."
                         ),
                         "symbol": "AAPL",
                     },
@@ -250,7 +263,8 @@ def test_research_brief_reports_trend_and_earnings() -> None:
     assert "volume 4" in text
     assert "growth 100.00 percent" in text
     assert "price over EPS 25.00" in text
-    assert "period end 2024-09-30" in text.split("latest statement", 1)[1]
+    assert "period end 2022-12-31" in text.split("latest statement", 1)[1]
+    assert "growth not computed" in text
     assert "background, not citable" in text
 
 
@@ -299,6 +313,41 @@ def test_lessons_drop_raw_decisions_and_keep_the_outcome() -> None:
     assert isinstance(first, dict)
     assert first["outcome"] == "abstained"
     assert len(str(first["thesis"])) == 180
+
+
+def test_a_later_availability_time_does_not_refresh_old_evidence() -> None:
+    as_of = datetime(2024, 6, 4, 22, 0, tzinfo=UTC)
+    observed = as_of - timedelta(hours=400)
+    available = as_of - timedelta(hours=2)
+    assert citation_time(observed, available) == observed
+    text = research_brief(
+        {
+            "evidence": [
+                {
+                    "available_at": available.isoformat(),
+                    "observed_at": observed.isoformat(),
+                    "evidence_id": "sec:filing:old",
+                    "kind": "news",
+                    "summary": "8-K accession old.",
+                    "symbol": "AAPL",
+                }
+            ]
+        },
+        as_of,
+    )
+    assert "background, not citable" in text
+
+
+def test_duplicate_proposal_keys_are_refused() -> None:
+    with pytest.raises(ValueError, match="repeats action"):
+        _json_object('{"action": "sell", "action": "buy"}')
+
+
+def test_cached_companyfact_stamp_moves_off_21_00_utc() -> None:
+    cached = datetime(2021, 4, 1, 21, 0, tzinfo=UTC)
+    moved = restamp_companyfact(cached, "sec-companyfacts")
+    assert moved.astimezone(ZoneInfo("America/New_York")).hour == 23
+    assert restamp_companyfact(cached, "sec-submissions") == cached
 
 
 def test_schema_bind_does_not_change_the_trade() -> None:
@@ -393,8 +442,11 @@ def test_a_post_decision_fact_waits_for_the_next_open(tmp_path: Path) -> None:
     first = json.loads((root / "context.json").read_text())
     assert "sec:fact:AAPL:late" not in _ids(first)
     receipt = json.loads((root / "receipt.json").read_text())
+    close_id = next(
+        item for item in _ids(first) if item.endswith(f"AAPL:close:{FIRST.isoformat()}")
+    )
     manager = PortfolioManager.recover(root / "book.sqlite")
-    recorded = manager.propose(_hold(receipt))
+    recorded = manager.propose(_buy(receipt, close_id))
     assert isinstance(recorded, dict)
     assert recorded["status"] == "accepted"
     follow = acknowledge(state, study, window, book="nomemory", model="terra")
@@ -414,27 +466,6 @@ def _ids(context: object) -> list[str]:
         assert isinstance(evidence_id, str)
         found.append(evidence_id)
     return found
-
-
-def _hold(receipt: dict[str, object]) -> InvestmentProposal:
-    proposal_id = receipt["proposal_id"]
-    as_of = receipt["as_of"]
-    assert isinstance(proposal_id, str)
-    assert isinstance(as_of, str)
-    return InvestmentProposal(
-        proposal_id=UUID(proposal_id),
-        as_of=datetime.fromisoformat(as_of),
-        action="hold",
-        symbol="SPY",
-        quantity=0,
-        thesis="The cited evidence is not enough for a trade.",
-        evidence_ids=(),
-        uncertainty="One session does not establish an edge.",
-        allocation_reasoning="Cash stays inside the local limits.",
-        exit_conditions=(),
-        execution="simulation",
-        inference="scripted",
-    )
 
 
 def test_session_clock_follows_new_york() -> None:

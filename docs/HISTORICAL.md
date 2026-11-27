@@ -17,7 +17,8 @@ is 9:30 a.m. New York and the close is 4:00 p.m. New York, including
 daylight time. The historical review window opens then and still closes
 at 23:59 UTC. The prospective session is unchanged. The next session's
 open is the fill. A companyfacts time after that day's decision waits
-until the next session open. Closes mark the book. The prompt adds a research block
+until the next session open. The citation age still uses the source
+time, so the later ingest does not make the fact fresh. Closes mark the book. The prompt adds a research block
 calculated from visible closes, volume, volatility, filings, and the
 latest revenue and diluted EPS. A statement older than 336 hours stays
 visible as background and cannot be cited on a trade. Market context is

@@ -85,9 +85,14 @@ citable" after truncating the age. Sol computed 336 hours, 36 minutes,
 and 54 seconds and did not cite it. The label now uses the validator's
 cutoff, so a timestamp past 336 hours is not called citable.
 
-A companyfacts time after the 22:00 UTC decision now waits until the
-next session open, so the ledger can accept it. The bullish window had
-one in-window text, an MSFT 8-K accepted at 10:51 a.m. New York on
+A companyfacts time after the 22:00 UTC decision waits until the next
+session open, and that fact is ingested before a fill at the same open.
+The citation age uses the source time, so the later ingest does not
+make the fact fresh. A cached companyfacts stamp of 21:00 UTC is
+rewritten to the end of that filed New York date on load. Growth is
+computed only when the two periods cover the same number of days. A
+proposal that repeats a key is refused. The bullish window had one
+in-window text, an MSFT 8-K accepted at 10:51 a.m. New York on
 2021-04-12, which was already inside that session. The ten recorded
 decisions did not lose a fact to that gap.
 
