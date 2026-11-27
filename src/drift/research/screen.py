@@ -286,18 +286,43 @@ def _dollar_volume(
 def _valuation(price: Decimal | None, facts: list[FactPoint]) -> str | None:
     if price is None:
         return None
-    chosen: tuple[date, date, Decimal] | None = None
+    parsed: list[tuple[date, date, Decimal, int | None]] = []
     for item in facts:
         match = _FACT.match(item.summary)
         if match is None or "EarningsPerShare" not in match.group("concept"):
             continue
-        value = Decimal(match.group("value"))
         period = date.fromisoformat(match.group("end"))
-        if chosen is None or (period, item.day) > (chosen[0], chosen[1]):
-            chosen = (period, item.day, value)
-    if chosen is None:
+        span = _span_days(match.group("start"), period)
+        parsed.append((period, item.day, Decimal(match.group("value")), span))
+    if not parsed:
         return None
-    eps = chosen[2]
+    latest = max((row[0], row[1]) for row in parsed)
+    tied = [row for row in parsed if (row[0], row[1]) == latest]
+    values = {row[2] for row in tied}
+    if len(values) == 1:
+        eps = next(iter(values))
+    else:
+        ranked: list[tuple[int, Decimal]] = []
+        for row in tied:
+            span = row[3]
+            if span is not None:
+                ranked.append((span, row[2]))
+        if not ranked:
+            return None
+        distance = min(abs(span - 365) for span, _value in ranked)
+        winners = [value for span, value in ranked if abs(span - 365) == distance]
+        if len(set(winners)) != 1:
+            return None
+        eps = winners[0]
     if eps <= 0:
         return "not computed"
     return str((price / eps).quantize(Decimal("0.01")))
+
+
+def _span_days(start: str | None, end: date) -> int | None:
+    if start is None:
+        return None
+    try:
+        return (end - date.fromisoformat(start)).days
+    except ValueError:
+        return None

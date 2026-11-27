@@ -62,9 +62,14 @@ def main(argv: list[str] | None = None) -> int:
     propose = sub.add_parser("propose", help="record one supervised proposal")
     propose.add_argument("--model", choices=("terra", "sol"), required=True)
     propose.add_argument("--proposal", type=Path, required=True)
-    detail = sub.add_parser("detail", help="print one cached evidence row")
-    detail.add_argument("--evidence-id", required=True)
+    detail = sub.add_parser("detail", help="print cached evidence")
+    detail.add_argument("--evidence-id")
+    detail.add_argument("--symbol")
+    detail.add_argument("--kind")
+    sub.add_parser("review", help="rewrite the prompt from the ledger's positions")
     sub.add_parser("execute", help="fill a pending trade from the next open")
+    ingest = sub.add_parser("ingest", help="append one validated evidence batch")
+    ingest.add_argument("--batch", type=Path, required=True)
     measure = sub.add_parser(
         "measure", help="compare a saved full context with its compact slice"
     )
@@ -83,8 +88,17 @@ def main(argv: list[str] | None = None) -> int:
                 payload = prepare(args.state)
             elif args.command == "propose":
                 payload = propose_one(args.state, args.model, args.proposal)
+            elif args.command == "review":
+                payload = review(args.state)
             elif args.command == "detail":
-                payload = detail_one(args.state, args.evidence_id)
+                payload = detail_one(
+                    args.state,
+                    args.evidence_id,
+                    symbol=args.symbol,
+                    kind=args.kind,
+                )
+            elif args.command == "ingest":
+                payload = ingest_one(args.state, args.batch)
             else:
                 payload = execute(args.state)
     except (OSError, ValueError, ManagerError, LedgerIntegrityError) as error:
@@ -111,6 +125,16 @@ def prepare(state: Path, *, now: datetime | None = None) -> dict[str, object]:
     if not schedule:
         schedule = tuple(symbol for symbol in symbols if counts[symbol] > 0)
     decision_day, settlement_day = choose_sessions(bars, schedule)
+    from drift.historical.replay import decision_time
+
+    cutoff = decision_time(decision_day)
+    suggestions = tuple(item for item in suggestions if item.observed_at <= cutoff)
+    statements = tuple(
+        item
+        for item in statements
+        if item.observed_at <= cutoff
+        and (item.available_at is None or item.available_at <= cutoff)
+    )
     deep = _deep_symbols(bars, decision_day, suggestions, holdings=frozenset())
     news_start = datetime.combine(
         decision_day - timedelta(days=14), datetime.min.time(), tzinfo=UTC
@@ -180,18 +204,95 @@ def propose_one(state: Path, model: str, proposal_path: Path) -> dict[str, objec
     return _plain(recorded)
 
 
-def detail_one(state: Path, evidence_id: str) -> dict[str, object]:
-    from drift.research.compact import lookup_evidence
+def detail_one(
+    state: Path,
+    evidence_id: str | None,
+    *,
+    symbol: str | None = None,
+    kind: str | None = None,
+) -> dict[str, object]:
+    from drift.research.compact import lookup_evidence, lookup_matches
 
-    cache = json.loads((state / "cache.json").read_text(encoding="utf-8"))
-    if not isinstance(cache, list):
-        message = "discovery cache is invalid"
+    cache = _cache(state)
+    if evidence_id:
+        found = lookup_evidence(cache, evidence_id)
+        if found is None:
+            message = f"evidence {evidence_id} is not in the discovery cache"
+            raise ValueError(message)
+        return found
+    if symbol is None and kind is None:
+        message = "detail needs an evidence id or a symbol or kind"
         raise ValueError(message)
-    found = lookup_evidence(cache, evidence_id)
-    if found is None:
-        message = f"evidence {evidence_id} is not in the discovery cache"
+    return {"rows": lookup_matches(cache, symbol=symbol, kind=kind)}
+
+
+def ingest_one(state: Path, batch_path: Path) -> dict[str, object]:
+    from drift.manager.models import IngestBatch
+
+    batch = IngestBatch.model_validate_json(batch_path.read_text(encoding="utf-8"))
+    manager = PortfolioManager.recover(state / "book.sqlite")
+    recorded = manager.ingest(batch)
+    cache = _cache(state)
+    for item in batch.evidence:
+        cache.append(json.loads(item.model_dump_json()))
+    (state / "cache.json").write_text(
+        json.dumps(cache, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    return _plain(recorded)
+
+
+def review(state: Path) -> dict[str, object]:
+    """Rewrite the prompt from shares the ledger already holds."""
+    from drift.historical.replay import decision_time
+    from drift.research.book import later_weekday, review_prompts
+
+    receipt = _receipt(state)
+    settlement = date.fromisoformat(str(receipt["settlement_day"]))
+    review_day = later_weekday(settlement)
+    as_of = decision_time(review_day)
+    manager = PortfolioManager.recover(state / "book.sqlite")
+    viewed = manager.context(as_of)
+    book = viewed.get("book") if isinstance(viewed, dict) else None
+    if not isinstance(book, dict):
+        message = "discovery ledger has no book"
         raise ValueError(message)
-    return found
+    cash = book.get("cash")
+    if not isinstance(cash, str):
+        message = "discovery ledger has no cash balance"
+        raise ValueError(message)
+    quantities: dict[str, int] = {}
+    holdings = book.get("holdings")
+    if isinstance(holdings, list):
+        for item in holdings:
+            if not isinstance(item, dict):
+                continue
+            symbol = item.get("symbol")
+            quantity = item.get("quantity")
+            if isinstance(symbol, str) and isinstance(quantity, int) and quantity > 0:
+                quantities[symbol] = quantity
+    prompts, proposal_ids, rows = review_prompts(
+        _cache(state),
+        cash=cash,
+        quantities=quantities,
+        review_day=review_day,
+    )
+    (state / "prompt-terra.txt").write_text(prompts["terra"] + "\n", encoding="utf-8")
+    (state / "prompt-sol.txt").write_text(prompts["sol"] + "\n", encoding="utf-8")
+    updated = dict(receipt)
+    updated["as_of"] = as_of.isoformat()
+    updated["proposal_ids"] = proposal_ids
+    updated["review_day"] = review_day.isoformat()
+    (state / "receipt.json").write_text(
+        json.dumps(updated, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return {
+        "as_of": as_of.isoformat(),
+        "cash": cash,
+        "holdings": quantities,
+        "shortlist": [row.symbol for row in rows if row.shortlisted],
+    }
 
 
 def execute(state: Path) -> dict[str, object]:
@@ -347,11 +448,28 @@ def _receipt(state: Path) -> dict[str, object]:
     return loaded
 
 
+def _cache(state: Path) -> list[dict[str, object]]:
+    loaded = json.loads((state / "cache.json").read_text(encoding="utf-8"))
+    if not isinstance(loaded, list):
+        message = "discovery cache is invalid"
+        raise ValueError(message)
+    rows: list[dict[str, object]] = []
+    for item in loaded:
+        if isinstance(item, dict):
+            rows.append({str(key): value for key, value in item.items()})
+    return rows
+
+
 def _assert_state(state: Path) -> None:
     assert_isolated(state)
     resolved = state.resolve()
     if "src" in resolved.parts or "tests" in resolved.parts:
         message = "discovery state must stay outside the source tree"
+        raise ValueError(message)
+    if resolved.name in {"observation", "readiness"} or any(
+        (resolved / f"{name}.sqlite").is_file() for name in ("terra", "sol")
+    ):
+        message = "discovery state cannot overwrite a prospective book"
         raise ValueError(message)
 
 

@@ -31,5 +31,11 @@ the fill. Abstaining remains valid.
 ```bash
 python -m drift.research propose --model terra --proposal proposal.json
 python -m drift.research execute
-python -m drift.research detail --evidence-id EVIDENCE_ID
+python -m drift.research review
+python -m drift.research detail --symbol PG --kind fundamental
+python -m drift.research ingest --batch batch.json
 ```
+
+`review` reads the ledger's cash and shares into the next weekday's
+prompt. It does not invent a position. `detail` can also print one
+evidence id. `ingest` validates a local batch through the portfolio cycle.

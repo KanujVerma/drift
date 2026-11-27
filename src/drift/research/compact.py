@@ -18,6 +18,10 @@ MAX_FOLLOW_UPS = 3
 NEWS_AGE_HOURS = 336
 _LATEST = re.compile(r"Latest (\S+) is ")
 _LABELED = re.compile(r"^(\S+) is (?:superseded|withdrawn),", re.MULTILINE)
+_FILING = re.compile(
+    r"^(?P<form>10-K/A|10-Q/A|8-K/A|10-K|10-Q|8-K) accession \S+"
+    r"(?: report (?P<report>\d{4}-\d{2}-\d{2}))?"
+)
 
 
 def compact_evidence(
@@ -46,7 +50,10 @@ def compact_evidence(
             _keep(kept, filing)
         for item in _headlines(visible, symbol, as_of):
             _keep(kept, item)
-        for item in _contradictions(visible, symbol, as_of):
+        contradicted = _contradictions(visible, symbol, as_of)
+        for item in contradicted:
+            _keep(kept, item)
+        for item in _replacements(visible, symbol, contradicted):
             _keep(kept, item)
     return [kept[key] for key in sorted(kept)]
 
@@ -102,6 +109,26 @@ def size_report(full_text: str, compact_text: str) -> dict[str, int | str]:
         "note": "div4 is a character estimate, not a provider token count",
         "reduction_characters": full - compact,
     }
+
+
+def lookup_matches(
+    evidence: Sequence[Mapping[str, object]],
+    *,
+    symbol: str | None = None,
+    kind: str | None = None,
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    """Newest matching cache rows. The limit keeps a follow-up small."""
+    matched = [
+        dict(item)
+        for item in evidence
+        if (symbol is None or item.get("symbol") == symbol)
+        and (kind is None or item.get("kind") == kind)
+    ]
+    matched.sort(key=lambda item: str(item.get("observed_at")))
+    if limit < 1:
+        return []
+    return matched[-limit:]
 
 
 def lookup_evidence(
@@ -228,6 +255,60 @@ def _filing(item: Mapping[str, object]) -> bool:
     if isinstance(source, str) and source.startswith("sec-"):
         return item.get("kind") == "news"
     return isinstance(summary, str) and summary.startswith(("10-K", "10-Q", "8-K"))
+
+
+def _replacements(
+    evidence: Sequence[Mapping[str, object]],
+    symbol: str,
+    superseded: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Keep the later row that makes a retained filing or fact superseded."""
+    extra: list[dict[str, object]] = []
+    for item in superseded:
+        observed = _time(item.get("observed_at"))
+        filing = _filing_identity(item)
+        fact = _fact_identity(str(item.get("evidence_id")))
+        if observed is None or (filing is None and fact is None):
+            continue
+        for other in evidence:
+            if other.get("symbol") != symbol:
+                continue
+            if other.get("evidence_id") == item.get("evidence_id"):
+                continue
+            other_time = _time(other.get("observed_at"))
+            if other_time is None or other_time <= observed:
+                continue
+            same_fact = (
+                fact is not None
+                and _fact_identity(str(other.get("evidence_id"))) == fact
+            )
+            same_filing = filing is not None and _filing_identity(other) == filing
+            summary = other.get("summary")
+            amended = isinstance(summary, str) and summary.startswith(
+                ("10-K/A", "10-Q/A", "8-K/A")
+            )
+            if same_fact or (same_filing and amended):
+                extra.append(dict(other))
+    return extra
+
+
+def _filing_identity(item: Mapping[str, object]) -> tuple[str, str, str] | None:
+    summary = item.get("summary")
+    symbol = item.get("symbol")
+    if not isinstance(summary, str) or not isinstance(symbol, str):
+        return None
+    parsed = _FILING.match(summary)
+    report = None if parsed is None else parsed.group("report")
+    if parsed is None or report is None:
+        return None
+    return symbol, parsed.group("form").removesuffix("/A"), report
+
+
+def _fact_identity(evidence_id: str) -> tuple[str, ...] | None:
+    parts = evidence_id.split(":")
+    if len(parts) < 9 or parts[0] != "sec" or parts[1] != "fact":
+        return None
+    return (parts[2], parts[3], parts[4], parts[5], ":".join(parts[8:]))
 
 
 def _contradictions(

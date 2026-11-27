@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import cast
 
@@ -59,6 +59,7 @@ class DiscoveryBook:
     mandate: SimulationMandate
     decision_day: date
     settlement_day: date
+    review_day: date
     as_of: datetime
     rows: tuple[ScreenRow, ...]
     proposal_ids: dict[str, str]
@@ -71,21 +72,29 @@ class DiscoveryBook:
 
 
 def choose_sessions(
-    bars: tuple[PriceBar, ...] | list[PriceBar], symbols: tuple[str, ...]
+    bars: tuple[PriceBar, ...] | list[PriceBar],
+    symbols: tuple[str, ...] = (),
 ) -> tuple[date, date]:
-    """Second-to-last shared session decides. The last shared session can fill."""
-    present: dict[str, set[date]] = {}
-    for bar in bars:
-        present.setdefault(bar.symbol, set()).add(bar.day)
-    if not symbols:
-        message = "discovery has no symbols to schedule"
-        raise ValueError(message)
-    shared = set.intersection(*(present.get(symbol, set()) for symbol in symbols))
-    days = sorted(shared)
+    """Last two observed market days. A missing research bar does not skip one.
+
+    ``symbols`` is unused. The calendar is every date that has a bar, so one
+    name's gap cannot pair a decision with a later fill across a real session.
+    A name with no open on the fill day is left unfilled.
+    """
+    del symbols
+    days = sorted({bar.day for bar in bars})
     if len(days) < 2:
-        message = "discovery needs two shared sessions to decide and settle"
+        message = "discovery needs two market sessions to decide and settle"
         raise ValueError(message)
     return days[-2], days[-1]
+
+
+def later_weekday(day: date) -> date:
+    """The next weekday after ``day``. It can host a later review."""
+    nxt = day + timedelta(days=1)
+    while nxt.weekday() >= 5:
+        nxt += timedelta(days=1)
+    return nxt
 
 
 def assemble_book(
@@ -105,8 +114,21 @@ def assemble_book(
     """Screen through the decision day and keep the next open for a later fill."""
     names = universe_by_symbol()
     as_of = decision_time(decision_day)
+    visible_texts = [
+        item
+        for item in texts
+        if item.observed_at <= as_of
+        and (item.available_at is None or item.available_at <= as_of)
+    ]
+    visible_suggestions = tuple(
+        item for item in suggestions if item.observed_at <= as_of
+    )
     cache = _cache_rows(
-        bars, _limit_texts(texts), suggestions, price_limitation, decision_day
+        bars,
+        _limit_texts(visible_texts),
+        visible_suggestions,
+        price_limitation,
+        decision_day,
     )
     closes = tuple(_close_point(item) for item in cache if _is_close(item))
     facts = tuple(
@@ -124,7 +146,7 @@ def assemble_book(
         universe=frozenset(names),
         authorized=frozenset(authorized),
         holdings=holdings,
-        suggestions=frozenset(item.symbol for item in suggestions),
+        suggestions=frozenset(item.symbol for item in visible_suggestions),
         facts=facts,
         min_dollar_volume=(
             MIN_MEDIAN_DOLLAR_VOLUME if min_dollar_volume is None else min_dollar_volume
@@ -194,7 +216,7 @@ def assemble_book(
     measurement = size_report(baseline_prompts["terra"], prompts["terra"])
     packet = _packet(
         names=names,
-        suggestions=suggestions,
+        suggestions=visible_suggestions,
         compact=compact,
         bars=bars,
         decision_day=decision_day,
@@ -209,6 +231,7 @@ def assemble_book(
         mandate=rules,
         decision_day=decision_day,
         settlement_day=settlement_day,
+        review_day=later_weekday(settlement_day),
         as_of=as_of,
         rows=rows,
         proposal_ids=proposal_ids,
@@ -219,6 +242,79 @@ def assemble_book(
         cache=tuple(cache),
         gaps=gaps,
     )
+
+
+def review_prompts(
+    cache: list[dict[str, object]],
+    *,
+    cash: str,
+    quantities: dict[str, int],
+    review_day: date,
+    authorized: tuple[str, ...] = ORIGINAL_TRADING_SYMBOLS,
+    min_dollar_volume: Decimal | None = None,
+    shortlist_limit: int | None = None,
+) -> tuple[dict[str, str], dict[str, str], tuple[ScreenRow, ...]]:
+    """Prompt a later session from shares the ledger already holds."""
+    names = universe_by_symbol()
+    as_of = decision_time(review_day)
+    visible = [item for item in cache if _visible_at(item, as_of)]
+    closes = tuple(_close_point(item) for item in visible if _is_close(item))
+    facts = tuple(
+        FactPoint(
+            symbol=str(item["symbol"]),
+            day=_day(item),
+            summary=str(item["summary"]),
+        )
+        for item in visible
+        if item.get("kind") == "fundamental"
+    )
+    held = frozenset(symbol for symbol, qty in quantities.items() if qty > 0)
+    rows = screen(
+        closes,
+        as_of=review_day,
+        universe=frozenset(names),
+        authorized=frozenset(authorized),
+        holdings=held,
+        facts=facts,
+        min_dollar_volume=(
+            MIN_MEDIAN_DOLLAR_VOLUME if min_dollar_volume is None else min_dollar_volume
+        ),
+        shortlist_limit=SHORTLIST_LIMIT if shortlist_limit is None else shortlist_limit,
+    )
+    deep = frozenset(
+        row.symbol
+        for row in rows
+        if row.shortlisted or row.trading_authorized or row.symbol in held
+    )
+    symbols = frozenset(row.symbol for row in rows if row.research_eligible)
+    compact = compact_evidence(visible, symbols=symbols, deep=deep, as_of=as_of)
+    shown = _context(compact, as_of, cash=cash, quantities=quantities)
+    brief = research_brief(
+        cast(ReplayJson, _context(visible, as_of, cash=cash, quantities=quantities)),
+        as_of,
+        policy="research",
+    )
+    proposal_ids = {
+        model: str(
+            deterministic_memory_uuid7(
+                f"discovery-review:{review_day.isoformat()}:{model}"
+            )
+        )
+        for model in ("terra", "sol")
+    }
+    prompts = {
+        model: render_discovery_prompt(
+            identity=MODELS[model],
+            proposal_id=proposal_ids[model],
+            as_of=as_of.isoformat(),
+            brief=brief,
+            rows=rows,
+            context=shown,
+            follow_ups=(),
+        )
+        for model in ("terra", "sol")
+    }
+    return prompts, proposal_ids, rows
 
 
 def discovery_mandate(authorized: tuple[str, ...]) -> SimulationMandate:
@@ -307,6 +403,7 @@ def _packet(
         sessions=(
             historical_session(decision_day),
             historical_session(settlement_day),
+            historical_session(later_weekday(settlement_day)),
         ),
         evidence=tuple(evidence),
         portfolio_context=PortfolioContext(
@@ -472,11 +569,25 @@ def _item(row: dict[str, object]) -> EvidenceItem:
     return EvidenceItem.model_validate(payload)
 
 
-def _context(evidence: list[dict[str, object]], as_of: datetime) -> dict[str, object]:
+def _context(
+    evidence: list[dict[str, object]],
+    as_of: datetime,
+    *,
+    cash: str = "10000",
+    quantities: dict[str, int] | None = None,
+) -> dict[str, object]:
     visible = [item for item in evidence if _visible_at(item, as_of)]
+    held = quantities or {}
     return {
         "as_of": as_of.isoformat(),
-        "book": {"cash": "10000", "holdings": []},
+        "book": {
+            "cash": cash,
+            "holdings": [
+                {"quantity": str(qty), "symbol": symbol}
+                for symbol, qty in sorted(held.items())
+                if qty > 0
+            ],
+        },
         "evidence": visible,
         "untrusted_text": True,
     }

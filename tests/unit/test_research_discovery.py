@@ -7,19 +7,30 @@ from typing import Literal, cast
 
 import pytest
 
-from drift.historical.replay import Json, decision_time, research_brief
-from drift.historical.sources import PriceBar
+from drift.historical.replay import (
+    Json,
+    decision_time,
+    historical_session,
+    research_brief,
+)
+from drift.historical.sources import PriceBar, TextInput
 from drift.manager.models import ExitCondition, InvestmentProposal
 from drift.manager.service import PortfolioManager
 from drift.memory.recorder import deterministic_memory_uuid7
 from drift.prospective.collect import UserSuggestion
 from drift.prospective.config import MODELS, START, UNIVERSE
-from drift.research.book import assemble_book, choose_sessions
+from drift.research.book import (
+    DiscoveryBook,
+    assemble_book,
+    choose_sessions,
+    review_prompts,
+)
 from drift.research.collect import rss_inputs
-from drift.research.compact import cited_ids_missing, compact_evidence
+from drift.research.compact import cited_ids_missing, compact_evidence, lookup_matches
 from drift.research.screen import (
     ClosePoint,
     FactPoint,
+    ScreenRow,
     screen,
 )
 from drift.research.universe import ORIGINAL_TRADING_SYMBOLS, RESEARCH_UNIVERSE
@@ -199,7 +210,9 @@ def test_isolated_book_escalates_a_new_name_and_can_fill_an_authorized_buy(
     )
     assert bought["status"] == "accepted"
     assert bought["fill"] is None
-    filled = _object(manager.execute_pending(book.packet.sessions[-1].closed_at))
+    filled = _object(
+        manager.execute_pending(historical_session(book.settlement_day).closed_at)
+    )
     assert filled["status"] == "filled"
 
 
@@ -207,6 +220,175 @@ def test_choose_sessions_uses_the_last_two_shared_days() -> None:
     days = _days(5)
     bars = _bars("AAPL", days, start=10, step=0, volume="10")
     assert choose_sessions(bars, ("AAPL",)) == (days[-2], days[-1])
+
+
+def test_a_missing_research_bar_does_not_skip_a_market_session() -> None:
+    days = _days(5)
+    bars = _bars("AAPL", days, start=10, step=0, volume="10")
+    bars.extend(
+        bar
+        for bar in _bars("CAT", days, start=10, step=0, volume="10")
+        if bar.day != days[-2]
+    )
+    assert choose_sessions(bars, ("AAPL", "CAT")) == (days[-2], days[-1])
+
+
+def test_a_later_review_can_sell_shares_the_ledger_holds(tmp_path: Path) -> None:
+    days = _days(70)
+    book = assemble_book(
+        _bars("AAPL", days, start=100, step=0, volume="1000000"),
+        (),
+        price_limitation="fixture prices, not an exchange print",
+        decision_day=days[-2],
+        settlement_day=days[-1],
+        min_dollar_volume=FLOOR,
+        shortlist_limit=1,
+    )
+    manager, _opened = PortfolioManager.open(
+        tmp_path / "book.sqlite", book.packet, book.mandate
+    )
+    bought = _object(
+        manager.propose(
+            _proposal(
+                "open-buy",
+                symbol="AAPL",
+                action="buy",
+                quantity=4,
+                evidence=(str(_row(book, "AAPL").latest_evidence_id),),
+                as_of=book.as_of,
+            )
+        )
+    )
+    assert bought["status"] == "accepted"
+    filled = _object(
+        manager.execute_pending(historical_session(book.settlement_day).closed_at)
+    )
+    assert filled["status"] == "filled"
+    _prompts, _ids, rows = review_prompts(
+        list(book.cache),
+        cash="8331.00",
+        quantities={"AAPL": 4},
+        review_day=book.review_day,
+        min_dollar_volume=FLOOR,
+    )
+    assert _row_from(rows, "AAPL").inclusion == "holding"
+    sold = _object(
+        manager.propose(
+            _proposal(
+                "later-sell",
+                symbol="AAPL",
+                action="sell",
+                quantity=1,
+                evidence=(str(_row(book, "AAPL").latest_evidence_id),),
+                as_of=decision_time(book.review_day),
+            )
+        )
+    )
+    assert sold["status"] == "accepted"
+    assert not any(
+        str(reason).startswith("unsafe_oversell") for reason in _reasons(sold)
+    )
+
+
+def test_compact_keeps_the_amendment_that_replaces_a_filing() -> None:
+    as_of = datetime(2026, 10, 16, 22, tzinfo=UTC)
+    original = _filing_row("10-Q", "2026-08-01T20:00:00+00:00", "2026-06-30")
+    amendment = _filing_row("10-Q/A", "2026-09-01T20:00:00+00:00", "2026-06-30")
+    later = _filing_row("8-K", "2026-10-01T20:00:00+00:00", "2026-10-01")
+    compact = compact_evidence(
+        [original, amendment, later],
+        symbols=frozenset({"CAT"}),
+        deep=frozenset({"CAT"}),
+        as_of=as_of,
+    )
+    ids = {item["evidence_id"] for item in compact}
+    assert original["evidence_id"] in ids
+    assert amendment["evidence_id"] in ids
+    assert later["evidence_id"] in ids
+
+
+def test_post_cutoff_facts_do_not_displace_the_visible_statement() -> None:
+    days = _days(70)
+    bars = _bars("CAT", days, start=100, step=1, volume="1000000")
+    visible = _eps("2026-02-01", "5", "2025-01-01", "2025-12-31")
+    later = _eps("2026-12-01", "9", "2026-01-01", "2026-12-31")
+    book = assemble_book(
+        bars,
+        (visible, later),
+        suggestions=(
+            UserSuggestion(
+                symbol="LATE",
+                summary="This note is after the decision.",
+                observed_at=datetime(2026, 12, 1, 22, tzinfo=UTC),
+            ),
+        ),
+        price_limitation="fixture prices, not an exchange print",
+        decision_day=days[-2],
+        settlement_day=days[-1],
+        min_dollar_volume=FLOOR,
+    )
+    assert _row(book, "CAT").price_over_eps == "33.60"
+    assert "LATE" not in {row.symbol for row in book.rows if row.shortlisted}
+
+
+def test_eps_multiple_does_not_depend_on_row_order() -> None:
+    facts = (
+        FactPoint(
+            symbol="JNJ",
+            day=date(2026, 10, 1),
+            summary=(
+                "EarningsPerShareDiluted 0.09 USD/shares period end 2026-09-27 "
+                "period start 2026-06-29 form 10-Q filed 2026-10-01."
+            ),
+        ),
+        FactPoint(
+            symbol="JNJ",
+            day=date(2026, 10, 1),
+            summary=(
+                "EarningsPerShareDiluted 4.49 USD/shares period end 2026-09-27 "
+                "period start 2025-12-29 form 10-Q filed 2026-10-01."
+            ),
+        ),
+    )
+    closes = _series("JNJ", _days(70), start=100, step=0, volume=1_000_000)
+    forward = screen(
+        closes,
+        as_of=date(2026, 10, 16),
+        universe=frozenset({"JNJ"}),
+        authorized=frozenset(),
+        facts=facts,
+        min_dollar_volume=FLOOR,
+    )
+    backward = screen(
+        closes,
+        as_of=date(2026, 10, 16),
+        universe=frozenset({"JNJ"}),
+        authorized=frozenset(),
+        facts=tuple(reversed(facts)),
+        min_dollar_volume=FLOOR,
+    )
+    assert forward[0].price_over_eps == backward[0].price_over_eps
+    assert forward[0].price_over_eps == "22.27"
+
+
+def test_lookup_can_find_a_symbol_without_an_evidence_id() -> None:
+    rows = lookup_matches(
+        [_close_row("PG", date(2026, 11, 24), 172), _fact("2026-10-22", "2")],
+        symbol="CAT",
+        kind="fundamental",
+    )
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "fundamental"
+
+
+def test_discovery_state_rejects_a_prospective_role_directory(tmp_path: Path) -> None:
+    from drift.research.__main__ import _assert_state
+
+    role = tmp_path / "observation"
+    role.mkdir()
+    (role / "terra.sqlite").write_bytes(b"")
+    with pytest.raises(ValueError, match="prospective"):
+        _assert_state(role)
 
 
 def test_rss_headline_is_untrusted_text() -> None:
@@ -245,6 +427,48 @@ def _reasons(result: dict[str, object]) -> list[object]:
         message = "manager result has no reason list"
         raise AssertionError(message)
     return reasons
+
+
+def _row(book: DiscoveryBook, symbol: str) -> ScreenRow:
+    return _row_from(book.rows, symbol)
+
+
+def _row_from(rows: tuple[ScreenRow, ...], symbol: str) -> ScreenRow:
+    return next(item for item in rows if item.symbol == symbol)
+
+
+def _filing_row(form: str, stamp: str, report: str) -> dict[str, object]:
+    accession = f"0000000000-26-{form.replace('/', '')}{report[-2:]}"
+    return {
+        "available_at": stamp,
+        "evidence_id": f"sec:filing:{accession}",
+        "kind": "news",
+        "limitations": ["fixture"],
+        "observed_at": stamp,
+        "price": None,
+        "price_role": None,
+        "source_label": "sec-submissions",
+        "summary": f"{form} accession {accession} report {report}.",
+        "symbol": "CAT",
+    }
+
+
+def _eps(filed: str, value: str, start: str, end: str) -> TextInput:
+    observed = datetime.fromisoformat(f"{filed}T21:00:00+00:00")
+    return TextInput(
+        evidence_id=(
+            f"sec:fact:CAT:EarningsPerShareDiluted:{end}:{start}:{filed}:10-K:USD"
+        ),
+        symbol="CAT",
+        kind="fundamental",
+        observed_at=observed,
+        summary=(
+            f"EarningsPerShareDiluted {value} USD period end {end} "
+            f"period start {start} form 10-K filed {filed}."
+        ),
+        source_label="sec-companyfacts",
+        limitations=("fixture",),
+    )
 
 
 def _proposal(
