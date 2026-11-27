@@ -561,6 +561,29 @@ def test_full_exit_removes_holding() -> None:
     assert kernel.state.realized_gross_pnl == Decimal("10.00")
 
 
+def test_cent_policy_full_liquidation_preserves_high_precision_basis() -> None:
+    from fractions import Fraction
+
+    kernel = PortfolioAccountingKernel(
+        _state("10"), session_clock=CLOCK, cent_basis_allocation=True
+    )
+    for price in (
+        "1.111111111111111111111111111111111",
+        "1.111111111111111111111111111111111",
+        "1.111111111111111111111111111111113",
+    ):
+        kernel.apply_fill(_buy(1, price))
+    assert kernel.state.holdings[0].cost_basis == Decimal(
+        "3.333333333333333333333333333333335"
+    )
+    kernel.apply_fill(_sell(3, "1.111111111111111111111111111111111"))
+    state = kernel.state
+    assert state.holdings == ()
+    assert Fraction(state.cash_balance) - Fraction(10) == Fraction(
+        state.realized_net_pnl
+    )
+
+
 def test_sell_rejects_more_than_held() -> None:
     kernel = _kernel("10000.00")
     kernel.apply_fill(_buy(5, "20.00"))

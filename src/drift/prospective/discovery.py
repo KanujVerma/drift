@@ -7,7 +7,7 @@ from typing import cast
 from drift.historical.replay import Json as ReplayJson
 from drift.historical.replay import research_brief
 from drift.manager.corporate_actions import split_date
-from drift.prospective.config import TRADING_SYMBOLS
+from drift.prospective.config import NY, TRADING_SYMBOLS
 from drift.research.book import (
     _close_point,
     _day,
@@ -34,14 +34,19 @@ def review_context(context: dict[str, object], as_of: datetime) -> dict[str, obj
             item.get("source_label"), item.get("evidence_id"), item.get("symbol")
         )
         symbol = item.get("symbol")
-        if day is not None and day <= as_of.date() and isinstance(symbol, str):
+        if (
+            day is not None
+            and day <= as_of.astimezone(NY).date()
+            and isinstance(symbol, str)
+        ):
             splits[symbol] = max(day, splits.get(symbol, day))
     evidence = [
         item
         for item in evidence
         if item.get("price_role") != "close"
         or item.get("symbol") not in splits
-        or _day(item) >= splits[str(item["symbol"])]
+        or datetime.fromisoformat(str(item["observed_at"])).astimezone(NY).date()
+        >= splits[str(item["symbol"])]
     ]
     book = context.get("book")
     if not isinstance(book, dict):
@@ -84,7 +89,7 @@ def review_context(context: dict[str, object], as_of: datetime) -> dict[str, obj
     ]
     rows = screen(
         closes,
-        as_of=as_of.date(),
+        as_of=as_of.astimezone(NY).date(),
         universe=frozenset(universe_by_symbol()),
         authorized=frozenset(TRADING_SYMBOLS),
         holdings=held,
@@ -117,7 +122,10 @@ def review_context(context: dict[str, object], as_of: datetime) -> dict[str, obj
             if item.get("symbol") == symbol
             and _is_close(item)
             and datetime.fromisoformat(str(item["observed_at"])) > decision_time
-            and (symbol not in splits or decision_time.date() >= splits[str(symbol)])
+            and (
+                symbol not in splits
+                or decision_time.astimezone(NY).date() >= splits[str(symbol)]
+            )
         ]
         if not later:
             continue

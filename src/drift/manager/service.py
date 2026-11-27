@@ -2403,6 +2403,7 @@ def _paired_close_benchmark(
         return unavailable
     histories: list[tuple[AuditEvent, ...]] = []
     packets: list[ResearchPacket] = []
+    sources: list[SQLiteLedger] = []
     first_seals: list[datetime] = []
     for name in ("terra.sqlite", "sol.sqlite"):
         path = ledger.path.parent / name
@@ -2429,8 +2430,29 @@ def _paired_close_benchmark(
                 break
         if first is None:
             return unavailable
+        packet = packet_through(events, until=as_of)
+        _opening, _mandate, *_rest, current_kernel = replay(events, until=as_of)
+        current_valuation, _, _, current_nav, _ = _valuation(current_kernel)
+        current_session = session_for(packet, as_of)
+        if (
+            current_valuation not in ("marked", "cash_only")
+            or current_nav is None
+            or current_session is None
+            or (
+                current_kernel.state.holdings
+                and current_session != current_kernel.state.session_key.local_date
+            )
+            or _invalidated_executions(packet, events, as_of)
+            or _unadjusted_split_holdings(packet, events, current_kernel, as_of)
+            or (
+                current_kernel.state.holdings
+                and not _pilot_coverage_available(source, as_of)
+            )
+        ):
+            return unavailable
         histories.append(events)
-        packets.append(packet_through(events, until=as_of))
+        packets.append(packet)
+        sources.append(source)
         first_seals.append(first)
     opening_packets = [replay(events)[0] for events in histories]
     closes: list[dict[str, EvidenceItem]] = []
@@ -2475,9 +2497,16 @@ def _paired_close_benchmark(
             )
         for when in sorted(checkpoints):
             values: list[str] = []
-            for events in histories:
-                _packet, _rules, *_rest, kernel = replay(events, until=when)
+            for events, source in zip(histories, sources, strict=True):
+                _opening, _rules, *_rest, kernel = replay(events, until=when)
                 if kernel.state.holdings and kernel.state.session_key.local_date != day:
+                    break
+                if kernel.state.holdings and (
+                    not _pilot_coverage_available(source, when)
+                    or _unadjusted_split_holdings(
+                        packet_through(events, until=when), events, kernel, when
+                    )
+                ):
                     break
                 valuation, _market, _unrealized, value, _reason = _valuation(kernel)
                 if valuation not in ("marked", "cash_only") or value is None:

@@ -230,6 +230,44 @@ def test_screen_does_not_compute_returns_across_a_split() -> None:
     assert row["return_63"] is None
 
 
+def test_future_split_waits_for_new_york_date_in_review() -> None:
+    from drift.prospective.discovery import review_context
+
+    before_midnight = datetime(2026, 1, 6, 0, 30, tzinfo=UTC)
+    close = datetime(2026, 1, 5, 21, tzinfo=UTC)
+    context: dict[str, object] = {
+        "book": {"cash": "10000", "holdings": []},
+        "evidence": [
+            {
+                "available_at": close.isoformat(),
+                "observed_at": close.isoformat(),
+                "evidence_id": "price-before-split",
+                "kind": "observation",
+                "price": "100",
+                "price_role": "close",
+                "source_label": "fixture",
+                "summary": "Daily close 100 for AAPL. Volume 10000000.",
+                "symbol": "AAPL",
+            },
+            {
+                "available_at": close.isoformat(),
+                "observed_at": close.isoformat(),
+                "evidence_id": "alpaca:split:AAPL:2026-01-06",
+                "kind": "news",
+                "price": None,
+                "price_role": None,
+                "source_label": "alpaca-corporate-action",
+                "summary": "forward_split AAPL ex_date 2026-01-06",
+                "symbol": "AAPL",
+            },
+        ],
+    }
+    before = review_context(context, before_midnight)
+    assert before["unadjusted_splits"] == {}
+    after = review_context(context, datetime(2026, 1, 6, 5, 0, tzinfo=UTC))
+    assert after["unadjusted_splits"] == {"AAPL": "2026-01-06"}
+
+
 def test_daily_saves_screen_and_compact_context_in_both_books(tmp_path: object) -> None:
     import json
     from dataclasses import replace

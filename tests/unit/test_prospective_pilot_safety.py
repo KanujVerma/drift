@@ -3266,3 +3266,57 @@ def test_sequential_decisions_compare_after_intervening_fill(
     assert comparisons[0]["start_as_of"] == after_close.isoformat()
     assert comparisons[0]["start_evidence_id"] == comparisons[1]["start_evidence_id"]
     assert all(comparison["portfolio_change"] == "0" for comparison in comparisons)
+
+    from drift.prospective.collect import TradeInvalidation
+
+    monday_close = datetime(2026, 11, 30, 21, 10, tzinfo=UTC)
+    spy_only_at = monday_close - timedelta(minutes=1)
+    spy_only = Bar(
+        "SPY",
+        spy_only_at - timedelta(hours=6),
+        "510",
+        "510",
+        spy_only_at,
+        "alpaca-bars-v2-iex-raw",
+        covered_until=spy_only_at,
+    )
+    perform_daily(
+        tmp_path,
+        "observation",
+        spy_only_at,
+        replace(collection(spy_only_at), bars=(spy_only,)),
+        suppress_reviews=True,
+    )
+    peer_report = PortfolioManager.recover(root / "sol.sqlite").report(spy_only_at)
+    assert isinstance(peer_report, dict)
+    peer_comparison = peer_report["benchmark_relative"]
+    assert isinstance(peer_comparison, dict)
+    assert peer_comparison["status"] == "unavailable"
+    monday_bars = tuple(
+        Bar(
+            symbol,
+            monday_close - timedelta(hours=6),
+            price,
+            price,
+            monday_close,
+            "alpaca-bars-v2-iex-raw",
+            covered_until=monday_close,
+        )
+        for symbol, price in (("AAPL", "110"), ("SPY", "510"))
+    )
+    notice = TradeInvalidation("AAPL", fill.source_id, monday_close, "canceled")
+    perform_daily(
+        tmp_path,
+        "observation",
+        monday_close,
+        replace(
+            collection(monday_close), bars=monday_bars, trade_invalidations=(notice,)
+        ),
+        suppress_reviews=True,
+    )
+    for name in MODELS:
+        report = PortfolioManager.recover(root / f"{name}.sqlite").report(monday_close)
+        assert isinstance(report, dict)
+        comparison = report["benchmark_relative"]
+        assert isinstance(comparison, dict)
+        assert comparison["status"] == "unavailable"

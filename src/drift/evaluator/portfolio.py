@@ -355,7 +355,9 @@ class PortfolioAccountingKernel:
                 f"costs {fill.transaction_costs}, holds {self._cash}"
             )
         basis = known_cost_basis(existing)
-        if self._cent_basis_allocation and fill.quantity != existing.quantity:
+        if self._cent_basis_allocation and fill.quantity == existing.quantity:
+            relieved = basis
+        elif self._cent_basis_allocation:
             # The sold portion is allocated to cents; every residual cent stays
             # in the position, so allocated and remaining basis sum to the
             # original basis. This policy is bound to new books explicitly.
