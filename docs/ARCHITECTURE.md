@@ -61,7 +61,9 @@ economics are related but distinct measures.
   series are labeled; an unlabeled or price-only series is not called S&P 500
   total return. State is stored in the retained SQLite ledger. Later inputs
   are appended with `ingest` and stay invisible until their availability time.
-  [V02](V02.md) is the prospective two-book workflow on that cycle. It does
+  [V02](V02.md) is the prospective two-book workflow on that cycle.
+  [HISTORICAL](HISTORICAL.md) replays the same cycle on past prices in a
+  separate directory and does not write the prospective ledgers. The cycle does
   not call M1d
   observation validation ([#135](https://github.com/KanujVerma/drift/issues/135)),
   realized-session stamp binding

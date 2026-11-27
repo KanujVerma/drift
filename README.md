@@ -10,7 +10,9 @@ that product; they are not the product's final purpose.
 validation, evidence, portfolio accounting, risk building blocks, and a
 simulation-only supervised portfolio cycle (`python -m drift.manager`).
 `python -m drift.prospective` runs the v0.2 prospective simulation described
-in [docs/V02.md](docs/V02.md). It does not include a broker adapter or order
+in [docs/V02.md](docs/V02.md). `python -m drift.historical` replays the same
+cycle on past prices without writing those books; see
+[docs/HISTORICAL.md](docs/HISTORICAL.md). It does not include a broker adapter or order
 dispatcher, and it does not establish an investing edge or connected-trading
 readiness. Paper validation and a $100 live pilot require separate
 authorization and controls.
