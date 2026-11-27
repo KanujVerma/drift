@@ -2470,7 +2470,7 @@ def _paired_close_benchmark(
                 event.timestamp
                 for event in events
                 if event.event_type == MARK
-                and start.observed_at <= event.timestamp <= as_of
+                and start.available_at <= event.timestamp <= as_of
                 and event.timestamp.astimezone(NY).date() == day
             )
         for when in sorted(checkpoints):

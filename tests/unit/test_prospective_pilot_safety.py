@@ -3135,8 +3135,9 @@ def test_unavailable_coverage_refuses_a_claimed_receipt(tmp_path: Path) -> None:
         _record_corporate_action_status(tmp_path, when, "unavailable", coverage_at=when)
 
 
+@pytest.mark.parametrize("mark_before_spy", [False, True])
 def test_sequential_decisions_compare_after_intervening_fill(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mark_before_spy: bool
 ) -> None:
     issued = datetime(2026, 11, 27, 16, tzinfo=UTC)
     old = datetime(2026, 11, 25, 14, 30, tzinfo=UTC)
@@ -3227,6 +3228,25 @@ def test_sequential_decisions_compare_after_intervening_fill(
         )
         for symbol, price in (("AAPL", "101"), ("SPY", "500"))
     )
+    if mark_before_spy:
+        early = after_close - timedelta(minutes=5)
+        early_bar = replace(closing_bars[0], fetched_at=early, covered_until=early)
+        early_result = perform_daily(
+            tmp_path,
+            "observation",
+            early,
+            replace(collection(early), bars=(early_bar,)),
+            suppress_reviews=True,
+        )
+        marks = early_result["marks"]
+        assert isinstance(marks, dict) and isinstance(marks["terra"], dict)
+        assert marks["terra"]["status"] == "marked"
+        early_report = PortfolioManager.recover(root / "terra.sqlite").report(early)
+        assert isinstance(early_report, dict)
+        early_comparison = early_report["benchmark_relative"]
+        assert isinstance(early_comparison, dict)
+        assert early_comparison["status"] == "unavailable"
+        closing_bars = closing_bars[1:]
     perform_daily(
         tmp_path,
         "observation",
@@ -3243,5 +3263,6 @@ def test_sequential_decisions_compare_after_intervening_fill(
         comparisons.append(report["benchmark_relative"])
     assert all(comparison["status"] == "available" for comparison in comparisons)
     assert comparisons[0]["start_as_of"] == comparisons[1]["start_as_of"]
+    assert comparisons[0]["start_as_of"] == after_close.isoformat()
     assert comparisons[0]["start_evidence_id"] == comparisons[1]["start_evidence_id"]
     assert all(comparison["portfolio_change"] == "0" for comparison in comparisons)
