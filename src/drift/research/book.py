@@ -283,7 +283,6 @@ def review_prompts(
         for item in visible
         if item.get("kind") == "suggestion" and isinstance(item.get("symbol"), str)
     )
-    ledger_close = _latest_registered_close(registered)
     rows = screen(
         closes,
         as_of=review_day,
@@ -297,20 +296,21 @@ def review_prompts(
         ),
         shortlist_limit=SHORTLIST_LIMIT if shortlist_limit is None else shortlist_limit,
     )
-    rows = tuple(_registered_row(row, registered_ids, ledger_close) for row in rows)
+    rows = tuple(_registered_row(row, registered_ids) for row in rows)
     deep = frozenset(
         row.symbol
         for row in rows
         if row.shortlisted or row.trading_authorized or row.symbol in held
     )
     symbols = frozenset(row.symbol for row in rows if row.research_eligible)
-    compact = compact_evidence(registered, symbols=symbols, deep=deep, as_of=as_of)
+    compact = _retain_displayed(
+        compact_evidence(registered, symbols=symbols, deep=deep, as_of=as_of),
+        registered,
+        rows,
+    )
     shown = _context(compact, as_of, cash=cash, quantities=quantities)
     brief = research_brief(
-        cast(
-            ReplayJson,
-            _context(registered, as_of, cash=cash, quantities=quantities),
-        ),
+        cast(ReplayJson, _context(visible, as_of, cash=cash, quantities=quantities)),
         as_of,
         policy="research",
     )
@@ -337,17 +337,47 @@ def review_prompts(
     return prompts, proposal_ids, rows
 
 
-def _registered_row(
-    row: ScreenRow,
-    registered_ids: set[str],
-    ledger_close: dict[str, str],
-) -> ScreenRow:
-    """Keep the calculated screen. Drop citation ids the ledger does not hold."""
+def _retain_displayed(
+    compact: list[dict[str, object]],
+    registered: list[dict[str, object]],
+    rows: tuple[ScreenRow, ...],
+) -> list[dict[str, object]]:
+    """Keep every anchor the screen still names, when the ledger has that row."""
+    present = {
+        str(item["evidence_id"])
+        for item in compact
+        if isinstance(item.get("evidence_id"), str)
+    }
+    by_id = {
+        str(item["evidence_id"]): item
+        for item in registered
+        if isinstance(item.get("evidence_id"), str)
+    }
+    kept = list(compact)
+    for row in rows:
+        for evidence_id in (
+            row.latest_evidence_id,
+            row.anchor_21_evidence_id,
+            row.anchor_63_evidence_id,
+        ):
+            if (
+                evidence_id is None
+                or evidence_id in present
+                or evidence_id not in by_id
+            ):
+                continue
+            kept.append(by_id[evidence_id])
+            present.add(evidence_id)
+    return kept
+
+
+def _registered_row(row: ScreenRow, registered_ids: set[str]) -> ScreenRow:
+    """Keep the calculated screen. Clear citation ids the ledger does not hold."""
 
     def keep(evidence_id: str | None) -> str | None:
         if evidence_id in registered_ids:
             return evidence_id
-        return ledger_close.get(row.symbol)
+        return None
 
     return ScreenRow(
         symbol=row.symbol,
@@ -368,23 +398,6 @@ def _registered_row(
         anchor_63_evidence_id=keep(row.anchor_63_evidence_id),
         notes=row.notes,
     )
-
-
-def _latest_registered_close(rows: list[dict[str, object]]) -> dict[str, str]:
-    found: dict[str, tuple[str, str]] = {}
-    for item in rows:
-        if not _is_close(item):
-            continue
-        symbol = item.get("symbol")
-        evidence_id = item.get("evidence_id")
-        observed = item.get("observed_at")
-        if not isinstance(symbol, str) or not isinstance(evidence_id, str):
-            continue
-        stamp = observed if isinstance(observed, str) else ""
-        current = found.get(symbol)
-        if current is None or stamp >= current[0]:
-            found[symbol] = (stamp, evidence_id)
-    return {symbol: evidence_id for symbol, (_stamp, evidence_id) in found.items()}
 
 
 def discovery_mandate(authorized: tuple[str, ...]) -> SimulationMandate:

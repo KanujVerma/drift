@@ -423,7 +423,23 @@ def test_review_screens_the_full_series_and_cites_only_the_ledger() -> None:
     assert cat.sessions == 69
     assert cat.shortlisted
     assert cat.latest_evidence_id == series[68]["evidence_id"]
+    assert cat.anchor_21_evidence_id is None
+    assert cat.anchor_63_evidence_id is None
     assert str(series[5]["evidence_id"]) not in prompts["terra"]
+    anchored = review_prompts(
+        series,
+        ledger=[series[5], series[47], series[68]],
+        cash="10000",
+        quantities={},
+        review_day=days[-2],
+        min_dollar_volume=FLOOR,
+    )
+    named = _row_from(anchored[2], "CAT")
+    context = anchored[0]["terra"].split("Context JSON:", 1)[1]
+    assert named.anchor_63_evidence_id == series[5]["evidence_id"]
+    assert named.anchor_21_evidence_id == series[47]["evidence_id"]
+    assert str(series[5]["evidence_id"]) in context
+    assert str(series[47]["evidence_id"]) in context
 
 
 def test_review_cites_only_registered_evidence_and_keeps_suggestions() -> None:
