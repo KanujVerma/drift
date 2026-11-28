@@ -2690,7 +2690,7 @@ def _price_benchmark(
         )
     ):
         return unavailable
-    from drift.prospective.config import NY
+    from drift.prospective.config import NY, active_models
 
     if any(
         start.observed_at.astimezone(NY).date()
@@ -2707,6 +2707,16 @@ def _price_benchmark(
     if difference is None:
         return unavailable
     change = _return_ratio(difference, start_price)
+    limitation = "SPY price return; dividends are not credited to either side"
+    if pilot:
+        if len(active_models()) == 1:
+            limitation += (
+                "; benchmark begins after the first decision while the book was in cash"
+            )
+        else:
+            limitation += (
+                "; benchmark begins after both first decisions while books were in cash"
+            )
     return {
         "status": "available",
         "series_kind": "price_only_substitute",
@@ -2715,14 +2725,7 @@ def _price_benchmark(
         "start_evidence_id": start.evidence_id,
         "end_evidence_id": end.evidence_id,
         "source_label": start.source_label,
-        "limitation": (
-            "SPY price return; dividends are not credited to either side"
-            + (
-                "; benchmark begins after both first decisions while books were in cash"
-                if pilot
-                else ""
-            )
-        ),
+        "limitation": limitation,
     }
 
 

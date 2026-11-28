@@ -1002,6 +1002,10 @@ def test_next_daily_requests_and_executes_timestamped_alpaca_trade(
     else:
         assert benchmark["status"] == "available"
         assert benchmark["series_change"] == "0.02"
+        assert benchmark["limitation"] == (
+            "SPY price return; dividends are not credited to either side"
+            "; benchmark begins after both first decisions while books were in cash"
+        )
 
         class LaterSubmitClock(datetime):
             @classmethod
@@ -1379,8 +1383,9 @@ def test_daily_submits_using_wall_clock_and_keeps_books_independent(
     assert isinstance(other, dict) and other["decisions"] == []
 
 
+@pytest.mark.parametrize("retry_in_session", [True, False])
 def test_submission_refuses_clock_behind_newly_ingested_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry_in_session: bool
 ) -> None:
     issued = datetime(2026, 11, 27, 18, 10, tzinfo=UTC)
     perform_daily(tmp_path, "observation", issued, collection(issued))
@@ -1437,6 +1442,49 @@ def test_submission_refuses_clock_behind_newly_ingested_evidence(
         tmp_path / "observation" / "terra.sqlite"
     ).verified_events()
     assert all(event.event_type != "manager.decision" for event in events)
+    assert (
+        sum(event.event_type == "manager.prospective_intent" for event in events) == 1
+    )
+    assert not any(event.event_type == "manager.prospective_seal" for event in events)
+
+    changed = proposal.model_copy(update={"thesis": "Changed after intent."})
+    path.write_text(changed.model_dump_json(), encoding="utf-8")
+    with pytest.raises(ValueError, match="conflicts with saved submission intent"):
+        apply_proposal(tmp_path, "observation", "terra", path)
+    path.write_text(proposal.model_dump_json(), encoding="utf-8")
+    if not retry_in_session:
+        from drift.prospective.run import resolve_expired_review
+
+        class AfterCutoff(datetime):
+            @classmethod
+            def now(cls, tz: object = None) -> Any:
+                return datetime(2026, 11, 30, 15, 0, tzinfo=UTC)
+
+        monkeypatch.setattr("drift.prospective.run.datetime", AfterCutoff)
+        expired = resolve_expired_review(
+            tmp_path, "terra", receipt["proposal_id"], "clock race unresolved"
+        )
+        assert expired["status"] == "expired"
+        with pytest.raises(ValueError, match="explicitly resolved as expired"):
+            apply_proposal(tmp_path, "observation", "terra", path)
+        events = SQLiteLedger.open_existing(
+            tmp_path / "observation" / "terra.sqlite"
+        ).verified_events()
+        assert not any(event.event_type == "manager.decision" for event in events)
+        assert not any(
+            event.event_type == "manager.prospective_seal" for event in events
+        )
+        return
+    retried = apply_proposal(tmp_path, "observation", "terra", path)
+    assert isinstance(retried, dict) and retried["status"] == "accepted"
+    events = SQLiteLedger.open_existing(
+        tmp_path / "observation" / "terra.sqlite"
+    ).verified_events()
+    assert (
+        sum(event.event_type == "manager.prospective_intent" for event in events) == 1
+    )
+    assert sum(event.event_type == "manager.decision" for event in events) == 1
+    assert sum(event.event_type == "manager.prospective_seal" for event in events) == 1
 
 
 def test_decision_without_same_session_commit_seal_remains_unverified(

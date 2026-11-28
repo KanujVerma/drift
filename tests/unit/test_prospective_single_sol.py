@@ -125,6 +125,24 @@ def test_single_sol_review_seal_causal_fill_and_report(
             price_role="trade",
         )
 
+    baseline_observed = sealed + timedelta(seconds=15)
+    baseline_available = sealed + timedelta(seconds=30)
+    baseline = EvidenceItem(
+        evidence_id=(
+            f"alpaca:benchmark:alpaca-trades-v2-iex:SPY:"
+            f"{baseline_observed.isoformat()}:V:3"
+        ),
+        kind="observation",
+        symbol="SPY",
+        observed_at=baseline_observed,
+        available_at=baseline_available,
+        limitations=("fixture",),
+        summary="Synthetic benchmark",
+        source_label="alpaca-trades-v2-iex",
+        price="500",
+        price_role="trade",
+    )
+    manager.ingest(IngestBatch(evidence=(baseline,)))
     first = sealed + timedelta(minutes=1)
     manager.ingest(IngestBatch(evidence=(trade(submitted, first, 1),)))
     with pilot_lock(tmp_path):
@@ -170,6 +188,13 @@ def test_single_sol_review_seal_causal_fill_and_report(
         closing: Any = manager.report(close_at)
         assert closing["benchmark_relative"]["status"] == "available"
         assert closing["benchmark_relative"]["start_portfolio_value"] == "10000"
+        price_benchmark = closing["price_return_benchmark"]
+        assert price_benchmark["status"] == "available"
+        assert price_benchmark["start_evidence_id"] == baseline.evidence_id
+        assert price_benchmark["limitation"] == (
+            "SPY price return; dividends are not credited to either side"
+            "; benchmark begins after the first decision while the book was in cash"
+        )
         noticed_at = close_at + timedelta(minutes=1)
         trade_id = f"alpaca-trades-v2-iex:AAPL:{first.isoformat()}:V:2"
         notice = TradeInvalidation("AAPL", trade_id, noticed_at, "canceled")
@@ -252,3 +277,140 @@ def test_inactive_model_is_rejected_before_any_submission(
     with pytest.raises(ValueError, match="inactive model"):
         _run(args)
     assert not (tmp_path / "readiness").exists()
+
+
+def test_visible_wrong_symbol_citation_is_recorded_and_sealed_as_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issued = configured(tmp_path, monkeypatch)
+    bar = Bar(
+        "AAPL",
+        datetime(2026, 11, 25, 14, 30, tzinfo=UTC),
+        "100",
+        "101",
+        issued,
+        "alpaca-bars-v2-iex-raw",
+        covered_until=issued,
+    )
+    perform_daily(
+        tmp_path, "observation", issued, replace(collection(issued), bars=(bar,))
+    )
+    folder = tmp_path / "observation" / "sol"
+    receipt = json.loads((folder / "receipt.json").read_text())
+    context = json.loads((folder / "context.json").read_text())
+    proposal = InvestmentProposal(
+        proposal_id=UUID(receipt["proposal_id"]),
+        as_of=issued,
+        action="buy",
+        symbol="MSFT",
+        quantity=1,
+        thesis="Synthetic mismatch",
+        evidence_ids=(context["evidence"][0]["evidence_id"],),
+        uncertainty="Fixture",
+        allocation_reasoning="Fixture",
+        exit_conditions=(ExitCondition(kind="price_below", threshold="90"),),
+        execution="simulation",
+        inference="native_supervised",
+        model_identity=MODELS["sol"],
+    )
+    path = tmp_path / "mismatched.json"
+    path.write_text(proposal.model_dump_json())
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return issued + timedelta(minutes=5)
+
+    monkeypatch.setattr("drift.prospective.run.datetime", Clock)
+    result = apply_proposal(tmp_path, "observation", "sol", path)
+    assert isinstance(result, dict) and result["status"] == "rejected"
+    reasons = result["reasons"]
+    assert isinstance(reasons, list)
+    assert any("evidence" in str(reason) for reason in reasons)
+    events = SQLiteLedger.open_existing(
+        tmp_path / "observation" / "sol.sqlite"
+    ).verified_events()
+    assert (
+        sum(event.event_type == "manager.prospective_intent" for event in events) == 1
+    )
+    assert sum(event.event_type == "manager.decision" for event in events) == 1
+    assert sum(event.event_type == "manager.prospective_seal" for event in events) == 1
+
+
+def test_single_intent_clock_race_allows_only_identical_same_session_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    issued = configured(tmp_path, monkeypatch)
+    bar = Bar(
+        "AAPL",
+        datetime(2026, 11, 25, 14, 30, tzinfo=UTC),
+        "100",
+        "101",
+        issued,
+        "alpaca-bars-v2-iex-raw",
+        covered_until=issued,
+    )
+    perform_daily(
+        tmp_path, "observation", issued, replace(collection(issued), bars=(bar,))
+    )
+    receipt = json.loads(
+        (tmp_path / "observation" / "sol" / "receipt.json").read_text()
+    )
+    proposal = InvestmentProposal(
+        proposal_id=UUID(receipt["proposal_id"]),
+        as_of=issued,
+        action="hold",
+        symbol="AAPL",
+        quantity=0,
+        thesis="Synthetic hold",
+        evidence_ids=(),
+        uncertainty="Fixture",
+        allocation_reasoning="Cash",
+        exit_conditions=(),
+        execution="simulation",
+        inference="native_supervised",
+        model_identity=MODELS["sol"],
+    )
+    path = tmp_path / "retry.json"
+    path.write_text(proposal.model_dump_json())
+    ledger_path = tmp_path / "observation" / "sol.sqlite"
+    manager = PortfolioManager.recover(ledger_path)
+    calls = 0
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                available = issued + timedelta(minutes=4)
+                item = EvidenceItem(
+                    evidence_id="single-race-news",
+                    kind="news",
+                    symbol="AAPL",
+                    observed_at=issued,
+                    available_at=available,
+                    limitations=("fixture",),
+                    summary="Synthetic event",
+                    source_label="fixture",
+                )
+                manager.ingest(IngestBatch(evidence=(item,)))
+                return issued + timedelta(minutes=3)
+            return issued + timedelta(minutes=2 if calls == 1 else 5)
+
+    monkeypatch.setattr("drift.prospective.run.datetime", Clock)
+    result = apply_proposal(tmp_path, "observation", "sol", path)
+    assert isinstance(result, dict) and result["status"] == "rejected"
+    events = SQLiteLedger.open_existing(ledger_path).verified_events()
+    assert sum(e.event_type == "manager.prospective_intent" for e in events) == 1
+    assert not any(e.event_type == "manager.decision" for e in events)
+    path.write_text(proposal.model_copy(update={"thesis": "Changed"}).model_dump_json())
+    with pytest.raises(ValueError, match="conflicts with saved submission intent"):
+        apply_proposal(tmp_path, "observation", "sol", path)
+    path.write_text(proposal.model_dump_json())
+    retried = apply_proposal(tmp_path, "observation", "sol", path)
+    assert isinstance(retried, dict) and retried["status"] == "accepted"
+    events = SQLiteLedger.open_existing(ledger_path).verified_events()
+    assert sum(e.event_type == "manager.prospective_intent" for e in events) == 1
+    assert sum(e.event_type == "manager.decision" for e in events) == 1
+    assert sum(e.event_type == "manager.prospective_seal" for e in events) == 1
