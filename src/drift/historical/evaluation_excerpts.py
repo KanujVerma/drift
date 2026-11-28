@@ -56,6 +56,8 @@ class _VisibleText(HTMLParser):
             self.parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in self._void:
+            return
         if self.hidden_depth:
             self.hidden_depth -= 1
         elif tag in self._blocks:

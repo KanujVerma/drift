@@ -196,6 +196,15 @@ def test_historical_state_rejects_custom_pilot_root(tmp_path: Path) -> None:
         assert_isolated(pilot / "nested")
 
 
+def test_historical_state_rejects_custom_pilot_without_window_marker(
+    tmp_path: Path,
+) -> None:
+    pilot = tmp_path / "custom-book"
+    (pilot / "observation").mkdir(parents=True)
+    with pytest.raises(ValueError, match="prospective"):
+        assert_isolated(pilot / "observation" / "nested")
+
+
 def test_constrained_passive_respects_the_position_cap() -> None:
     control = constrained_passive("100", "110")
     assert control["shares"] == "24"

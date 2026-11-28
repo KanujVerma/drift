@@ -93,6 +93,10 @@ def assert_isolated(state: Path) -> None:
         message = "historical state cannot be placed inside the prospective directory"
         raise ValueError(message)
     for ancestor in (resolved, *resolved.parents):
+        if (ancestor / "observation").is_dir():
+            raise ValueError(
+                "historical state cannot be placed inside a prospective directory"
+            )
         marker = ancestor / "window.json"
         if not marker.is_file():
             continue
@@ -100,9 +104,7 @@ def assert_isolated(state: Path) -> None:
             window = json.loads(marker.read_text(encoding="utf-8"))
         except OSError, ValueError:
             window = None
-        if (ancestor / "observation").is_dir() or (
-            isinstance(window, dict) and "pilot_version" in window
-        ):
+        if isinstance(window, dict) and "pilot_version" in window:
             raise ValueError(
                 "historical state cannot be placed inside a prospective directory"
             )

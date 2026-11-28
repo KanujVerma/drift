@@ -1,9 +1,11 @@
 """The expanded replay uses historical state and the current review."""
 
 import json
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime
 
+import pytest
 from test_historical_replay import FIRST, SECOND, _study
 
 from drift.historical.replay import prepare_review
@@ -120,8 +122,12 @@ def test_expanded_purchase_fills_at_next_open_and_remembers_own_outcome(tmp_path
     assert any(row["symbol"] == "AMZN" for row in next_context["decisions"])
 
 
-def test_native_can_cite_a_displayed_prior_outcome_but_not_an_unshown_id(tmp_path):
-    import pytest
+@pytest.mark.parametrize(
+    ("symbol", "expected"), [("AAPL", "accepted"), ("AMZN", "rejected")]
+)
+def test_native_trade_cites_only_eligible_displayed_outcomes(
+    tmp_path, symbol, expected
+):
     from test_historical_replay import _buy
 
     from drift.historical.replay import acknowledge, apply_native
@@ -156,10 +162,15 @@ def test_native_can_cite_a_displayed_prior_outcome_but_not_an_unshown_id(tmp_pat
     context = json.loads((root / "context.json").read_text())
     receipt = json.loads((root / "receipt.json").read_text())
     outcome_id = context["decisions"][0]["outcome_id"]
+    own_price = next(
+        row["evidence_id"]
+        for row in context["evidence"]
+        if row.get("symbol") == symbol and row.get("price_role") == "close"
+    )
     proposal = _buy(receipt, outcome_id).model_copy(
         update={
-            "action": "hold",
-            "quantity": 0,
+            "symbol": symbol,
+            "evidence_ids": (own_price, outcome_id),
             "inference": "native_supervised",
             "model_identity": receipt["model_identity"],
         }
@@ -176,7 +187,18 @@ def test_native_can_cite_a_displayed_prior_outcome_but_not_an_unshown_id(tmp_pat
     result = apply_native(
         tmp_path, study, window, book="memory", model="sol", proposal_path=path
     )
-    assert result["recorded_status"] == "accepted"
+    assert result["recorded_status"] == expected
+    with sqlite3.connect(root / "book.sqlite") as connection:
+        rows = connection.execute(
+            "SELECT payload_json FROM audit_events "
+            "WHERE event_type = 'manager.decision' ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+    assert rows is not None
+    reasons = json.loads(rows[0])["reasons"]
+    if symbol == "AMZN":
+        assert any("records AAPL, not AMZN" in reason for reason in reasons)
+    else:
+        assert all(not reason.startswith("unsupported_evidence") for reason in reasons)
 
 
 def test_new_historical_books_use_cent_basis_while_old_books_reopen(tmp_path):
