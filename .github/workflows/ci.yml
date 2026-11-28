@@ -142,6 +142,13 @@ jobs:
           uv run python -c "import sys; print(sys.version); print(sys.executable)"
           uv run python -c "import pathlib, sys; assert sys.version.split()[0] == pathlib.Path('.python-version').read_text().strip()"
 
+      - name: Test Drift ChatGPT sign-in
+        if: steps.scope.outputs.docs_only != 'true'
+        working-directory: tools/chatgpt-signin
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+
       - name: uv run pytest
         if: steps.scope.outputs.docs_only != 'true'
         run: uv run pytest

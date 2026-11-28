@@ -1,0 +1,6 @@
+Drift's sign-in component incorporates code from TradingAgents:
+https://github.com/TauricResearch/TradingAgents
+Revision 121265d18d467ac717f7af99cb0d669c15d2e73c.
+Copyright 2026 Tauric Research. Licensed under Apache License 2.0; see LICENSE.
+The sign-in and private-file imports were modified for Drift, as marked in source.
+The other Drift-specific files are not part of the upstream work.

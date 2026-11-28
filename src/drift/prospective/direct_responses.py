@@ -1,19 +1,23 @@
-"""Offline-tested building blocks for a future supervised ChatGPT-plan connection.
-
-There is deliberately no live client factory or command: Drift does not yet have
-its own verified OAuth session or a verified no-extra-billing gate. The private
-transport below is exercised with an in-memory HTTP transport in tests only.
-"""
+"""Supervised ChatGPT-plan request preparation, with live billing gate closed."""
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
+import logging
+import os
+import stat
+import sys
+import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
+import jwt
 from openai import OpenAI
 
 from drift.ledger.sqlite import SQLiteLedger
@@ -22,13 +26,15 @@ from drift.manager.models import InvestmentProposal
 from drift.prospective.config import MODELS
 from drift.prospective.locking import pilot_lock
 from drift.prospective.run import (
+    Json,
     _execution_barriers,
     _expired_review_ids,
     _json_object,
     _review_context_time,
+    apply_proposal,
     review_prompt,
 )
-from drift.prospective.window import active_window
+from drift.prospective.window import active_window, verify_current_window
 
 MODEL = "gpt-6.2-sol"
 EFFORT: Literal["xhigh"] = "xhigh"
@@ -45,8 +51,8 @@ class SavedReview:
 
 
 @dataclass(frozen=True)
-class _SessionFixture:
-    """Test inputs only; fields here do not verify a real OAuth identity."""
+class PlanSession:
+    """Drift's protected, previously verified OAuth session."""
 
     token: str = field(repr=False)
     subject: str
@@ -54,6 +60,7 @@ class _SessionFixture:
     client_id: str
     scopes: frozenset[str]
     expires_at: datetime
+    id_token: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,9 @@ class GeneratedProposal:
     observed_model: str
     requested_effort: str
     observed_effort: str
+    response_id: str
+    account_subject_sha256: str
+    client_id: str
     route: str = "chatgpt-plan-responses"
 
 
@@ -134,15 +144,199 @@ def saved_review(state: Path) -> SavedReview:
         return SavedReview(identifier, as_of, event.event_hash, instructions, context)
 
 
-def live_request() -> None:
-    """Fail closed until verified Drift authorization and billing gates exist."""
-    raise RuntimeError("live ChatGPT-plan inference is not enabled")
+def load_session(path: Path, *, expected_subject: str, now: datetime) -> PlanSession:
+    """Load only a protected Drift sign-in and match its verified account."""
+    if not expected_subject or now.tzinfo is None:
+        raise ValueError("expected account and current time are required")
+    parent = path.parent.lstat()
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or parent.st_mode & 0o077
+    ):
+        raise ValueError("Drift sign-in directory is not private")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+            or info.st_size > 65536
+        ):
+            raise ValueError("Drift sign-in file is not private")
+        try:
+            value = json.load(handle)
+        except ValueError, UnicodeDecodeError:
+            raise ValueError("invalid Drift sign-in file") from None
+    if not isinstance(value, dict):
+        raise ValueError("invalid Drift sign-in file")
+    account = value.get("account")
+    registration = value.get("registration")
+    tokens = value.get("tokens")
+    if not all(isinstance(item, dict) for item in (account, registration, tokens)):
+        raise ValueError("Drift sign-in is incomplete")
+    assert isinstance(account, dict)
+    assert isinstance(registration, dict)
+    assert isinstance(tokens, dict)
+    subject = account.get("subject")
+    client_id = account.get("client_id")
+    token = tokens.get("access_token")
+    scopes = tokens.get("scopes")
+    expires = tokens.get("expires_at")
+    if (
+        subject != expected_subject
+        or not isinstance(client_id, str)
+        or not client_id.startswith("oaiapp_")
+        or client_id != registration.get("client_id")
+        or not isinstance(value.get("host_id"), str)
+        or not isinstance(token, str)
+        or not token
+        or token.startswith("sk-")
+        or not isinstance(tokens.get("id_token"), str)
+        or not isinstance(scopes, list)
+        or not all(isinstance(scope, str) for scope in scopes)
+        or not {PLAN_SCOPE, "resource.invoke"} <= set(scopes)
+        or isinstance(expires, bool)
+        or not isinstance(expires, (int, float))
+    ):
+        raise ValueError("Drift sign-in account or plan permission is invalid")
+    try:
+        expiry = datetime.fromtimestamp(expires, UTC)
+    except ValueError, OverflowError, OSError:
+        raise ValueError("invalid sign-in expiry") from None
+    if expiry <= now:
+        raise ValueError("Drift sign-in has expired")
+    return PlanSession(
+        token,
+        subject,
+        expected_subject,
+        client_id,
+        frozenset(scopes),
+        expiry,
+        id_token=tokens["id_token"],
+    )
 
 
-def _request_for_test(
-    client: OpenAI, session: _SessionFixture, review: SavedReview, *, now: datetime
+def verify_session_identity(session: PlanSession, http: httpx.Client) -> None:
+    """Revalidate the retained ID token using OpenAI's current signing keys."""
+    try:
+        header = jwt.get_unverified_header(session.id_token)
+        if header.get("alg") != "RS256" or not isinstance(header.get("kid"), str):
+            raise ValueError("invalid identity header")
+        response = http.get("https://auth.openai.com/.well-known/jwks.json", timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        keys = data.get("keys") if isinstance(data, dict) else None
+        if not isinstance(keys, list):
+            raise ValueError("invalid signing keys")
+        matches = [
+            key
+            for key in keys
+            if isinstance(key, dict)
+            and key.get("kid") == header["kid"]
+            and key.get("kty") == "RSA"
+            and key.get("alg", "RS256") == "RS256"
+            and key.get("use", "sig") == "sig"
+        ]
+        if len(matches) != 1:
+            raise ValueError("identity signing key unavailable")
+        key = jwt.PyJWK.from_dict(matches[0], algorithm="RS256").key
+        claims = jwt.decode(
+            session.id_token,
+            key,
+            algorithms=["RS256"],
+            audience=session.client_id,
+            issuer="https://auth.openai.com",
+            leeway=5,
+            options={"require": ["iss", "aud", "exp", "sub"]},
+        )
+        if (
+            claims.get("sub") != session.subject
+            or session.subject != session.expected_subject
+        ):
+            raise ValueError("signed identity does not match selected account")
+    except Exception:
+        raise ValueError(
+            "Drift signed account identity could not be verified"
+        ) from None
+
+
+def _require_no_extra_billing(_session: PlanSession) -> None:
+    """No trusted account-specific control verifier has been implemented yet."""
+    raise RuntimeError("live inference requires verified no-extra-billing controls")
+
+
+def live_request(state: Path, *, expected_subject: str) -> dict[str, Any]:
+    """Run a supervised request after the no-extra-billing gate is implemented."""
+    state = state.resolve()
+    if state.is_relative_to(Path(__file__).resolve().parents[3]):
+        raise ValueError("prospective state must be outside the source tree")
+    if not state.is_dir():
+        raise ValueError("prospective state does not exist")
+    path = Path.home() / ".local/share/drift/chatgpt-signin/auth.json"
+    session = load_session(
+        path, expected_subject=expected_subject, now=datetime.now(UTC)
+    )
+    _require_no_extra_billing(session)
+    with httpx.Client(follow_redirects=False, trust_env=False) as identity_http:
+        verify_session_identity(session, identity_http)
+    if any(
+        os.environ.get(name)
+        for name in (
+            "OPENAI_CUSTOM_HEADERS",
+            "OPENAI_ORG_ID",
+            "OPENAI_PROJECT_ID",
+            "OPENAI_ADMIN_KEY",
+            "OPENAI_LOG",
+        )
+    ) or any(
+        logging.getLogger(name).isEnabledFor(logging.DEBUG)
+        for name in ("openai", "httpx", "httpcore")
+    ):
+        raise RuntimeError("unsafe ambient OpenAI SDK configuration")
+    with pilot_lock(state):
+        verify_current_window(state)
+        review = saved_review(state)
+        with OpenAI(
+            api_key=session.token,
+            base_url="https://api.openai.com/v1",
+            max_retries=0,
+            http_client=httpx.Client(
+                timeout=180, follow_redirects=False, trust_env=False
+            ),
+        ) as client:
+            result = _request(client, session, review, now=datetime.now(UTC))
+        verify_current_window(state)
+        evidence: dict[str, Json] = {
+            "route": result.route,
+            "requested_model": result.requested_model,
+            "observed_model": result.observed_model,
+            "requested_effort": result.requested_effort,
+            "observed_effort": result.observed_effort,
+            "response_id": result.response_id,
+            "account_subject_sha256": result.account_subject_sha256,
+            "client_id": result.client_id,
+            "review_hash": result.review_hash,
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", delete=False
+        ) as tmp:
+            proposal_path = Path(tmp.name)
+            tmp.write(result.proposal.model_dump_json())
+        try:
+            outcome = apply_proposal(
+                state, "observation", "sol", proposal_path, runtime_evidence=evidence
+            )
+        finally:
+            proposal_path.unlink()
+        return {"proposal": outcome, "runtime_evidence": evidence}
+
+
+def _request(
+    client: OpenAI, session: PlanSession, review: SavedReview, *, now: datetime
 ) -> GeneratedProposal:
-    """Run the adapter against a test client; never call with a live client."""
+    """Request and validate a proposal after a caller has checked the billing gate."""
     if (
         not session.token
         or not session.client_id
@@ -155,8 +349,6 @@ def _request_for_test(
         or client.api_key != session.token
     ):
         raise ValueError("missing or mismatched plan authorization")
-    if not isinstance(client._client._transport, httpx.MockTransport):
-        raise ValueError("live ChatGPT-plan inference is not enabled")
     try:
         catalog = client.get("/models", cast_to=dict[str, Any])
         models = catalog.get("models")
@@ -181,8 +373,13 @@ def _request_for_test(
             stream=True,
         ) as stream:
             completed: dict[str, Any] | None = None
+            deadline = time.monotonic() + 180
+            total_bytes = 0
             for event in stream:
                 data = event.model_dump(mode="json")
+                total_bytes += len(json.dumps(data).encode("utf-8"))
+                if time.monotonic() > deadline or total_bytes > 8_000_000:
+                    raise AdapterError("inference stream exceeded its bound")
                 kind = data.get("type")
                 if kind in {"error", "response.failed", "response.incomplete"}:
                     raise AdapterError("inference failed or was incomplete")
@@ -244,4 +441,38 @@ def _request_for_test(
     }
     if not set(proposal.evidence_ids) <= visible:
         raise ValueError("proposal cites evidence outside the saved review")
-    return GeneratedProposal(proposal, review.review_hash, MODEL, MODEL, EFFORT, EFFORT)
+    response_id = completed.get("id")
+    if not isinstance(response_id, str) or not response_id or len(response_id) > 200:
+        raise ValueError("completion has no valid response identifier")
+    return GeneratedProposal(
+        proposal,
+        review.review_hash,
+        MODEL,
+        MODEL,
+        EFFORT,
+        EFFORT,
+        response_id,
+        hashlib.sha256(session.subject.encode("utf-8")).hexdigest(),
+        session.client_id,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Supervised direct Responses request")
+    parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--expected-subject", required=True)
+    args = parser.parse_args(argv)
+    try:
+        result = live_request(args.state, expected_subject=args.expected_subject)
+    except Exception:
+        print(
+            "Direct request unavailable; check authorization and billing controls.",
+            file=sys.stderr,
+        )
+        return 2
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

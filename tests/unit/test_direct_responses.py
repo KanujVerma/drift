@@ -1,13 +1,16 @@
 """Offline-only Responses adapter checks; no credentials or external calls."""
 
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from openai import OpenAI
 from test_prospective_pilot_safety import collection
 from test_prospective_single_sol import configured
@@ -16,10 +19,12 @@ from drift.ledger.sqlite import SQLiteLedger
 from drift.prospective.collect import Bar
 from drift.prospective.direct_responses import (
     PLAN_SCOPE,
-    _request_for_test,
-    _SessionFixture,
+    PlanSession,
+    _request,
     live_request,
+    load_session,
     saved_review,
+    verify_session_identity,
 )
 from drift.prospective.run import apply_proposal, perform_daily
 
@@ -42,12 +47,12 @@ def review_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path,
     return tmp_path, saved_review(tmp_path)
 
 
-def session() -> _SessionFixture:
-    return _SessionFixture(
+def session() -> PlanSession:
+    return PlanSession(
         token="fixture-oauth-token",
         subject="verified-subject",
         expected_subject="verified-subject",
-        client_id="fixture-client",
+        client_id="oaiapp_fixture",
         scopes=frozenset({PLAN_SCOPE}),
         expires_at=datetime(2026, 12, 2, tzinfo=UTC),
     )
@@ -123,8 +128,8 @@ def client_for(events: list[dict[str, Any]], calls: list[httpx.Request]) -> Open
     )
 
 
-def invoke(client: OpenAI, review: Any, auth: _SessionFixture | None = None) -> Any:
-    return _request_for_test(
+def invoke(client: OpenAI, review: Any, auth: PlanSession | None = None) -> Any:
+    return _request(
         client, auth or session(), review, now=datetime(2026, 12, 1, tzinfo=UTC)
     )
 
@@ -221,18 +226,36 @@ def test_invalid_proposal_and_tampered_review(review_state: tuple[Path, Any]) ->
         saved_review(state)
 
 
-def test_live_path_is_disabled() -> None:
-    with pytest.raises(RuntimeError, match="not enabled"):
-        live_request()
-
-
-def test_real_transport_is_blocked_before_network(
-    review_state: tuple[Path, Any],
+def test_live_path_is_blocked_before_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _, review = review_state
-    with OpenAI(api_key="fixture-oauth-token", max_retries=0) as client:
-        with pytest.raises(ValueError, match="not enabled"):
-            invoke(client, review)
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.load_session", lambda *a, **k: session()
+    )
+
+    def unexpected_client(*args: object, **kwargs: object) -> None:
+        raise AssertionError("network client must not be created")
+
+    monkeypatch.setattr("drift.prospective.direct_responses.OpenAI", unexpected_client)
+    with pytest.raises(RuntimeError, match="no-extra-billing"):
+        live_request(tmp_path, expected_subject="verified-subject")
+
+
+def test_ambient_sdk_headers_stop_before_inference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.load_session", lambda *a, **k: session()
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses._require_no_extra_billing", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.verify_session_identity", lambda *a: None
+    )
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "fixture: untrusted")
+    with pytest.raises(RuntimeError, match="unsafe ambient"):
+        live_request(tmp_path, expected_subject="verified-subject")
 
 
 def test_uncited_context_cannot_be_invented(review_state: tuple[Path, Any]) -> None:
@@ -244,6 +267,71 @@ def test_uncited_context_cannot_be_invented(review_state: tuple[Path, Any]) -> N
     event["response"]["output"][0]["content"][0]["text"] = json.dumps(value)
     with pytest.raises(ValueError, match="outside the saved review"):
         invoke(client_for([event], []), review)
+
+
+def test_reads_only_matching_private_drift_session(tmp_path: Path) -> None:
+    directory = tmp_path / "drift-auth"
+    directory.mkdir(mode=0o700)
+    path = directory / "auth.json"
+    value: dict[str, Any] = {
+        "host_id": "urn:uuid:fixture",
+        "registration": {"client_id": "oaiapp_fixture"},
+        "account": {"client_id": "oaiapp_fixture", "subject": "verified-subject"},
+        "tokens": {
+            "access_token": "fixture-oauth-token",
+            "id_token": "fixture-id-token",
+            "scopes": [PLAN_SCOPE, "resource.invoke"],
+            "expires_at": datetime(2026, 12, 2, tzinfo=UTC).timestamp(),
+        },
+    }
+    path.write_text(json.dumps(value), encoding="utf-8")
+    path.chmod(0o600)
+    now = datetime(2026, 12, 1, tzinfo=UTC)
+    loaded = load_session(path, expected_subject="verified-subject", now=now)
+    assert loaded.subject == "verified-subject"
+    assert "fixture-oauth-token" not in repr(loaded)
+    with pytest.raises(ValueError, match="account"):
+        load_session(path, expected_subject="different-subject", now=now)
+    value["tokens"]["access_token"] = "sk-paid-fixture"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ValueError, match="account"):
+        load_session(path, expected_subject="verified-subject", now=now)
+    os.chmod(path, 0o644)
+    with pytest.raises(ValueError, match="not private"):
+        load_session(path, expected_subject="verified-subject", now=now)
+
+
+@pytest.mark.parametrize("bad", [None, "subject", "audience", "signature", "expired"])
+def test_saved_session_identity_is_verified_against_signing_key(
+    bad: str | None,
+) -> None:
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    signing = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        if bad == "signature"
+        else private
+    )
+    public = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private.public_key()))
+    public.update({"kid": "fixture", "alg": "RS256", "use": "sig"})
+    claims = {
+        "iss": "https://auth.openai.com",
+        "aud": "wrong" if bad == "audience" else "oaiapp_fixture",
+        "sub": "wrong" if bad == "subject" else "verified-subject",
+        "exp": datetime.now(UTC) + timedelta(seconds=-30 if bad == "expired" else 600),
+    }
+    token = jwt.encode(claims, signing, algorithm="RS256", headers={"kid": "fixture"})
+    auth = replace(session(), id_token=token)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://auth.openai.com/.well-known/jwks.json"
+        return httpx.Response(200, json={"keys": [public]})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        if bad is None:
+            verify_session_identity(auth, http)
+        else:
+            with pytest.raises(ValueError, match="could not be verified"):
+                verify_session_identity(auth, http)
 
 
 def test_provider_usage_limit_is_sanitized(review_state: tuple[Path, Any]) -> None:
@@ -323,10 +411,107 @@ def test_proposal_reuses_submission_and_seal(
             return next(clocks)
 
     monkeypatch.setattr("drift.prospective.run.datetime", Clock)
-    accepted = apply_proposal(state, "observation", "sol", path)
+    evidence = {
+        "route": result.route,
+        "requested_model": result.requested_model,
+        "observed_model": result.observed_model,
+        "requested_effort": result.requested_effort,
+        "observed_effort": result.observed_effort,
+        "response_id": result.response_id,
+        "account_subject_sha256": result.account_subject_sha256,
+        "client_id": result.client_id,
+        "review_hash": result.review_hash,
+    }
+    accepted = apply_proposal(
+        state, "observation", "sol", path, runtime_evidence=evidence
+    )
     assert isinstance(accepted, dict) and accepted["status"] == "accepted"
     ledger = SQLiteLedger.open_existing(state / "observation" / "sol.sqlite")
-    kinds = [event.event_type for event in ledger.verified_events()]
+    events = ledger.verified_events()
+    kinds = [event.event_type for event in events]
     assert kinds.index("manager.decision") < kinds.index("manager.prospective_seal")
+    from drift.manager.book import thaw
+
+    intent = next(
+        event for event in events if event.event_type == "manager.prospective_intent"
+    )
+    assert thaw(intent.payload)["runtime_evidence"] == evidence
     with pytest.raises(ValueError, match="resolved|submitted"):
         saved_review(state)
+
+
+def test_supervised_path_uses_shared_transport_and_persists_provenance(
+    review_state: tuple[Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, review = review_state
+    calls: list[httpx.Request] = []
+    auth = replace(session(), expires_at=datetime.now(UTC) + timedelta(days=1))
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.load_session", lambda *a, **k: auth
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses._require_no_extra_billing", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.verify_session_identity", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.verify_current_window", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.OpenAI",
+        lambda **k: client_for([completed(review)], calls),
+    )
+    clocks = iter(
+        (
+            review.as_of + timedelta(minutes=5),
+            review.as_of + timedelta(minutes=5, seconds=1),
+            review.as_of + timedelta(minutes=5, seconds=2),
+        )
+    )
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return next(clocks)
+
+    monkeypatch.setattr("drift.prospective.run.datetime", Clock)
+    outcome = live_request(state, expected_subject="verified-subject")
+    assert outcome["proposal"]["status"] == "accepted"
+    assert outcome["runtime_evidence"]["response_id"] == "response-fixture"
+    assert outcome["runtime_evidence"]["route"] == "chatgpt-plan-responses"
+    assert len(calls) == 2
+    ledger = SQLiteLedger.open_existing(state / "observation" / "sol.sqlite")
+    from drift.manager.book import thaw
+
+    intent = next(
+        event
+        for event in ledger.verified_events()
+        if event.event_type == "manager.prospective_intent"
+    )
+    assert thaw(intent.payload)["runtime_evidence"] == outcome["runtime_evidence"]
+
+
+def test_invalid_runtime_evidence_does_not_write_intent(
+    review_state: tuple[Path, Any],
+) -> None:
+    state, review = review_state
+    result = invoke(client_for([completed(review)], []), review)
+    path = state / "generated-proposal.json"
+    path.write_text(result.proposal.model_dump_json(), encoding="utf-8")
+    ledger = SQLiteLedger.open_existing(state / "observation" / "sol.sqlite")
+    before = ledger.verified_events()
+    invalid = {
+        "route": result.route,
+        "requested_model": result.requested_model,
+        "observed_model": "wrong-model",
+        "requested_effort": result.requested_effort,
+        "observed_effort": result.observed_effort,
+        "response_id": result.response_id,
+        "account_subject_sha256": result.account_subject_sha256,
+        "client_id": result.client_id,
+        "review_hash": result.review_hash,
+    }
+    with pytest.raises(ValueError, match="runtime evidence"):
+        apply_proposal(state, "observation", "sol", path, runtime_evidence=invalid)
+    assert ledger.verified_events() == before
