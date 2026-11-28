@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
 from drift.domain.evaluator_portfolio import decimal_context
@@ -26,6 +26,7 @@ from drift.manager.evidence_validity import (
     citation_refusal,
 )
 from drift.manager.models import (
+    CENT_BASIS_ALLOCATION,
     REQUIRED_CONTEXT_LIMITATIONS,
     REQUIRED_PACKET_LIMITATIONS,
     BenchmarkPoint,
@@ -42,15 +43,21 @@ from drift.memory.recorder import deterministic_memory_uuid7
 from drift.prospective.config import (
     EVIDENCE_AGE_HOURS,
     MODELS,
+    TRADING_SYMBOLS,
     UNIVERSE,
     instruments,
     mandate,
+    pilot_instruments,
 )
 
 type Json = None | bool | int | str | list[Json] | dict[str, Json]
 
 BOOKS = ("memory", "lessons", "nomemory")
 LOOKBACK_CLOSES = 63
+CLOSE_TIME_LIMITATION = (
+    "conservative 4 PM New York timestamp; actual exchange close time and "
+    "source publication time are not supplied and may differ"
+)
 BenchmarkKind = Literal["sp500_total_return", "price_only_substitute"]
 
 
@@ -64,13 +71,41 @@ class Study:
     benchmark_kind: BenchmarkKind
     benchmark_limitation: str
     price_limitation: str
+    workflow: Literal["legacy", "current13"] = "legacy"
+    review_exit_conditions: bool = False
+
+
+def _symbols(study: Study) -> tuple[str, ...]:
+    if study.workflow == "current13":
+        return TRADING_SYMBOLS
+    if study.workflow != "legacy":
+        raise ValueError("unknown historical workflow")
+    return tuple(symbol for symbol, _cik, _name in UNIVERSE)
 
 
 def assert_isolated(state: Path) -> None:
     """Refuse a state directory that would write the prospective books."""
-    if "prospective" in state.resolve().parts:
+    resolved = state.resolve()
+    if any(
+        part == "prospective" or part.startswith("prospective-")
+        for part in resolved.parts
+    ):
         message = "historical state cannot be placed inside the prospective directory"
         raise ValueError(message)
+    for ancestor in (resolved, *resolved.parents):
+        marker = ancestor / "window.json"
+        if not marker.is_file():
+            continue
+        try:
+            window = json.loads(marker.read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            window = None
+        if (ancestor / "observation").is_dir() or (
+            isinstance(window, dict) and "pilot_version" in window
+        ):
+            raise ValueError(
+                "historical state cannot be placed inside a prospective directory"
+            )
 
 
 def decision_time(day: date) -> datetime:
@@ -153,6 +188,7 @@ def prepare_review(
     assert_isolated(state)
     root = _root(state, window.regime, book, model)
     root.mkdir(parents=True, exist_ok=True)
+    _bind_workflow(root, study)
     index, phase = _cursor(root)
     if phase == "complete":
         return {
@@ -189,7 +225,34 @@ def prepare_review(
     manager.mark(decision_time(day))
     context = _record_report(root, manager, study, window, day)
     shown = shown_context(context, book)
-    _write_prompt(root, window, book, model, day, shown)
+    if study.workflow == "current13":
+        from drift.prospective.discovery import review_context
+
+        if not isinstance(shown, dict):
+            raise ValueError("historical context is not an object")
+        visible = historical_cash_view(cast(dict[str, object], shown), day)
+        shown = cast(Json, review_context(visible, decision_time(day)))
+    if isinstance(shown, dict) and isinstance(shown.get("evidence"), list):
+        for row in cast(list[Json], shown["evidence"]):
+            if (
+                isinstance(row, dict)
+                and row.get("price_role") == "close"
+                and str(row.get("evidence_id", "")).startswith("hist:")
+                and isinstance(row.get("limitations"), list)
+            ):
+                limitations = cast(list[Json], row["limitations"])
+                if CLOSE_TIME_LIMITATION not in limitations:
+                    limitations.append(CLOSE_TIME_LIMITATION)
+    _write_prompt(
+        root,
+        window,
+        book,
+        model,
+        day,
+        shown,
+        workflow=study.workflow,
+        review_exit_conditions=study.review_exit_conditions,
+    )
     _write_cursor(root, {"index": index, "phase": "proposal_due"})
     return {
         "as_of": decision_time(day).isoformat(),
@@ -210,6 +273,7 @@ def acknowledge(
     _check_names(book, model)
     assert_isolated(state)
     root = _root(state, window.regime, book, model)
+    _bind_workflow(root, study)
     index, phase = _cursor(root)
     if phase != "proposal_due":
         message = "no historical proposal is waiting"
@@ -242,7 +306,9 @@ def apply_native(
 ) -> dict[str, object]:
     """Record one native proposal, then prepare the next session or settle."""
     _check_names(book, model)
+    assert_isolated(state)
     root = _root(state, window.regime, book, model)
+    _bind_workflow(root, study)
     receipt = json.loads((root / "receipt.json").read_text(encoding="utf-8"))
     if not isinstance(receipt, dict):
         message = "historical receipt is invalid"
@@ -261,6 +327,26 @@ def apply_native(
     ):
         message = f"{model} proposal does not match the historical receipt"
         raise ValueError(message)
+    if study.workflow == "current13":
+        displayed = json.loads((root / "context.json").read_text(encoding="utf-8"))
+        if not isinstance(displayed, dict) or not isinstance(
+            displayed.get("evidence"), list
+        ):
+            raise ValueError("historical review evidence is unavailable")
+        ids = {
+            row.get("evidence_id")
+            for row in displayed["evidence"]
+            if isinstance(row, dict) and isinstance(row.get("evidence_id"), str)
+        }
+        decisions = displayed.get("decisions")
+        if isinstance(decisions, list):
+            ids.update(
+                row["outcome_id"]
+                for row in decisions
+                if isinstance(row, dict) and isinstance(row.get("outcome_id"), str)
+            )
+        if not set(proposal.evidence_ids).issubset(ids):
+            raise ValueError("proposal cites evidence not shown in the review")
     manager = PortfolioManager.recover(root / "book.sqlite")
     recorded = manager.propose(proposal)
     (root / "last-proposal.json").write_text(
@@ -281,14 +367,17 @@ def missing_dates(study: Study, window: Window) -> frozenset[date]:
     for day in needed:
         if day not in levels:
             missing.add(day)
-        for symbol, _cik, _name in UNIVERSE:
+        for symbol in _symbols(study):
             if _bar(study, symbol, day) is None:
                 missing.add(day)
     return frozenset(missing)
 
 
 def texts_for_window(
-    texts: tuple[TextInput, ...], window: Window
+    texts: tuple[TextInput, ...],
+    window: Window,
+    *,
+    symbols: tuple[str, ...] | None = None,
 ) -> tuple[TextInput, ...]:
     """Keep a short pre-window sample plus anything filed inside the window."""
     start = open_time(window.decision_days[0])
@@ -296,7 +385,7 @@ def texts_for_window(
     before = [item for item in texts if item.observed_at <= start]
     during = [item for item in texts if start < item.observed_at <= end]
     kept: list[TextInput] = []
-    for symbol, _cik, _name in UNIVERSE:
+    for symbol in symbols if symbols is not None else tuple(row[0] for row in UNIVERSE):
         fundamentals = [
             item
             for item in before
@@ -352,7 +441,46 @@ def _manager(
     path = _root(state, window.regime, book, model) / "book.sqlite"
     packet = _opening_packet(study, window)
     rules = historical_mandate()
-    manager, _opened = PortfolioManager.open(path, packet, rules)
+    if study.workflow == "current13":
+        rules = rules.model_copy(update={"allowed_symbols": TRADING_SYMBOLS})
+    try:
+        manager, _opened = PortfolioManager.open(path, packet, rules)
+    except ManagerError as error:
+        if str(error) != "ledger packet does not match the supplied packet":
+            raise
+        # Existing studies keep their original, hash-verified packet.
+        legacy = packet.model_copy(
+            update={
+                "limitations": tuple(
+                    item for item in packet.limitations if item != CENT_BASIS_ALLOCATION
+                ),
+                "evidence": tuple(
+                    item.model_copy(
+                        update={
+                            "limitations": tuple(
+                                note
+                                for note in item.limitations
+                                if note != CLOSE_TIME_LIMITATION
+                            )
+                        }
+                    )
+                    for item in packet.evidence
+                ),
+                "benchmark": tuple(
+                    point.model_copy(
+                        update={
+                            "limitations": tuple(
+                                note
+                                for note in point.limitations
+                                if note != CLOSE_TIME_LIMITATION
+                            )
+                        }
+                    )
+                    for point in packet.benchmark
+                ),
+            }
+        )
+        manager, _opened = PortfolioManager.open(path, legacy, rules)
     return manager
 
 
@@ -388,7 +516,9 @@ def _opening_packet(study: Study, window: Window) -> ResearchPacket:
         raise ValueError(message)
     point = _benchmark_point(study, window.warmup_day, warmup)
     return ResearchPacket(
-        instruments=instruments(),
+        instruments=pilot_instruments()
+        if study.workflow == "current13"
+        else instruments(),
         sessions=tuple(historical_session(day) for day in days),
         evidence=tuple(evidence),
         portfolio_context=PortfolioContext(
@@ -399,6 +529,7 @@ def _opening_packet(study: Study, window: Window) -> ResearchPacket:
         ),
         limitations=REQUIRED_PACKET_LIMITATIONS
         + (
+            CENT_BASIS_ALLOCATION,
             "historical sessions are not the prospective observation calendar",
             "source gaps are recorded beside the collection and are not invented",
             study.price_limitation,
@@ -508,7 +639,7 @@ def _items_through(
                 if item.available_at <= deadline:
                     items.append(item)
     for text in study.texts:
-        if not _symbol_known(text.symbol):
+        if text.symbol not in _symbols(study):
             continue
         available = _ready_at(text, window)
         if available <= deadline:
@@ -520,7 +651,7 @@ def _lookback_closes(study: Study, before: date) -> list[EvidenceItem]:
     """Prior closes used for indicators. They are history, not the fill."""
     found: dict[str, list[date]] = {}
     for bar in study.bars:
-        if bar.day < before and _symbol_known(bar.symbol):
+        if bar.day < before and bar.symbol in _symbols(study):
             found.setdefault(bar.symbol, []).append(bar.day)
     items: list[EvidenceItem] = []
     for symbol, days in found.items():
@@ -535,7 +666,7 @@ def _price_items(
     study: Study, day: date, role: Literal["open", "close"]
 ) -> list[EvidenceItem]:
     rows: list[EvidenceItem] = []
-    for symbol, _cik, _name in UNIVERSE:
+    for symbol in _symbols(study):
         item = _optional_price(study, symbol, day, role)
         if item is None:
             message = f"missing {symbol} bar on {day.isoformat()}"
@@ -564,7 +695,9 @@ def _optional_price(
             "symbol": symbol,
             "observed_at": when,
             "available_at": when,
-            "limitations": (study.price_limitation,),
+            "limitations": (study.price_limitation, CLOSE_TIME_LIMITATION)
+            if role == "close"
+            else (study.price_limitation,),
             "summary": f"Daily {role} {price} for {symbol}.{volume}",
             "source_label": bar.source_label,
             "price": price,
@@ -598,7 +731,7 @@ def _texts_due(
     opened = open_time(day)
     due: list[EvidenceItem] = []
     for text in study.texts:
-        if not _symbol_known(text.symbol):
+        if text.symbol not in _symbols(study):
             continue
         available = _ready_at(text, window)
         if at_open and available == opened:
@@ -644,9 +777,43 @@ def _benchmark_point(study: Study, day: date, level: str) -> BenchmarkPoint:
     return BenchmarkPoint(
         available_at=close_time(day),
         level=level,
-        limitations=(study.benchmark_limitation,),
+        limitations=(study.benchmark_limitation, CLOSE_TIME_LIMITATION),
         series_kind=study.benchmark_kind,
     )
+
+
+def historical_cash_view(context: dict[str, object], day: date) -> dict[str, object]:
+    """Explain a cash-only historical book without pretending a ledger mark exists."""
+    book = context.get("book")
+    if not isinstance(book, dict):
+        raise ValueError("historical context has no book")
+    cash = book.get("cash")
+    if (
+        book.get("valuation") != "unavailable"
+        or book.get("holdings") != []
+        or not isinstance(cash, str)
+    ):
+        return context
+    amount = Decimal(cash)
+    if not amount.is_finite() or amount < 0:
+        raise ValueError("historical cash is invalid")
+    updated = dict(context)
+    corrected = dict(book)
+    corrected.update(
+        {
+            "historical_review_session": day.isoformat(),
+            "holdings_market_value": "0",
+            "net_asset_value": cash,
+            "valuation": "cash_only_calculated",
+            "valuation_reason": (
+                "No holdings: net asset value is the verified cash balance. "
+                "The session field is the last advanced ledger session; "
+                "no portfolio mark was recorded for the review session."
+            ),
+        }
+    )
+    updated["book"] = corrected
+    return updated
 
 
 def shown_context(context: Json, book: str) -> Json:
@@ -809,6 +976,9 @@ def _write_prompt(
     model: str,
     day: date,
     context: Json,
+    *,
+    workflow: Literal["legacy", "current13"] = "legacy",
+    review_exit_conditions: bool = False,
 ) -> None:
     identity = MODELS[model]
     proposal_id = str(
@@ -844,6 +1014,20 @@ def _write_prompt(
         context_json=payload,
         policy="research",
     )
+    if workflow == "current13":
+        from drift.prospective.run import review_prompt
+
+        prompt = review_prompt(
+            identity=identity,
+            proposal_id=proposal_id,
+            as_of=as_of,
+            context_path=str(root / "context.json"),
+            exit_condition_guidance=review_exit_conditions,
+        )
+        prompt += (
+            "Historical simulation: the next session open is the execution "
+            "proxy; public future history may be known to the model.\n"
+        )
     (root / "prompt.txt").write_text(prompt + "\n", encoding="utf-8")
     receipt = {
         "as_of": as_of,
@@ -1534,7 +1718,11 @@ def _record_report(
     day: date,
 ) -> Json:
     as_of = decision_time(day)
-    context = manager.context(as_of)
+    context = manager.context(
+        as_of,
+        include_exit_conditions=study.review_exit_conditions,
+        include_exact_nav=study.workflow == "current13",
+    )
     _append_report(
         root,
         {
@@ -1572,6 +1760,24 @@ def _write_cursor(root: Path, payload: dict[str, object]) -> None:
         json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _bind_workflow(root: Path, study: Study) -> None:
+    """Prevent reuse of a book under another workflow or an unknown profile."""
+    _symbols(study)
+    path = root / "workflow.txt"
+    if study.review_exit_conditions and study.workflow != "current13":
+        raise ValueError("exit-condition review requires the current workflow")
+    binding = study.workflow + (":exit-review" if study.review_exit_conditions else "")
+    if path.exists():
+        if path.read_text(encoding="utf-8").strip() != binding:
+            raise ValueError("historical book workflow mismatch")
+        return
+    if (root / "book.sqlite").exists() or (root / "cursor.json").exists():
+        if study.workflow != "legacy":
+            raise ValueError("existing historical book has no workflow binding")
+        return
+    path.write_text(binding + "\n", encoding="utf-8")
 
 
 def _root(state: Path, regime: str, book: str, model: str) -> Path:

@@ -366,3 +366,27 @@ def test_first_observation_cannot_start_after_the_fixed_window_begins(
     result = perform_daily(tmp_path, "observation", monday, collection(monday))
     assert result["status"] == "fresh_window_required"
     assert list(tmp_path.rglob("*.sqlite")) == []
+
+
+def test_experimental_citation_guidance_is_opt_in() -> None:
+    from drift.prospective.run import review_prompt
+
+    args = dict(
+        identity="codex/gpt-6.2-sol@xhigh",
+        proposal_id="id",
+        as_of="2024-01-31T22:00:00+00:00",
+        context_path="context.json",
+    )
+    baseline = review_prompt(**args)
+    assert baseline == review_prompt(**args, same_symbol_guidance=False)
+    candidate = review_prompt(**args, same_symbol_guidance=True)
+    assert (
+        "every ID in evidence_ids must refer to the proposed trade's own symbol"
+        in candidate
+    )
+    assert (
+        "every ID in evidence_ids must refer to the proposed trade's own symbol"
+        not in baseline
+    )
+    assert "If the evidence is not enough, abstain." in candidate
+    assert "25% position cap" in candidate

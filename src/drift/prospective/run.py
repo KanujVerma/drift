@@ -1921,7 +1921,13 @@ def status_report(state: Path, role: str, as_of: datetime) -> dict[str, Json]:
 
 
 def review_prompt(
-    *, identity: str, proposal_id: str, as_of: str, context_path: str
+    *,
+    identity: str,
+    proposal_id: str,
+    as_of: str,
+    context_path: str,
+    same_symbol_guidance: bool = False,
+    exit_condition_guidance: bool = False,
 ) -> str:
     lines = [
         "Return one JSON object and nothing else.",
@@ -1966,6 +1972,21 @@ def review_prompt(
         "",
         f"Context file: {context_path}",
     ]
+    if same_symbol_guidance:
+        lines.append(
+            "When proposing a buy or sell, every ID in evidence_ids must refer "
+            "to the proposed trade's own symbol. Do not list SPY or other "
+            "companies' evidence IDs for that trade. You may compare alternatives "
+            "when explaining allocation, but comparisons do not replace evidence "
+            "about the traded symbol. If the symbol-specific evidence is "
+            "insufficient, hold."
+        )
+    if exit_condition_guidance:
+        lines.append(
+            "Recorded exit conditions are review signals, not automatic orders. "
+            "For each held position, consider relevant prior conditions and "
+            "current evidence before deciding whether to hold or trade."
+        )
     return "\n".join(lines) + "\n"
 
 
