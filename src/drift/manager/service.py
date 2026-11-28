@@ -150,6 +150,22 @@ def _serialize_pilot_book[**P, R](
             with pilot_lock(path.parent.parent):
                 packet, mandate, *_ = replay(self._ledger.verified_events())
                 _require_window_binding(packet, mandate)
+                if (
+                    path.parent.name == "observation"
+                    and PROSPECTIVE_SEAL_REQUIRED not in mandate.acknowledgements
+                    and method.__name__
+                    in {
+                        "propose",
+                        "execute_pending",
+                        "mark",
+                        "ingest",
+                        "reflect",
+                        "feedback",
+                    }
+                ):
+                    raise ValueError(
+                        "legacy observation book without a seal policy is read-only"
+                    )
                 return method(self, *args, **kwargs)
         return method(self, *args, **kwargs)
 

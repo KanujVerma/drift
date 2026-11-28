@@ -1960,7 +1960,7 @@ def test_conflicting_ingest_histories_are_not_reconciled(tmp_path: Path) -> None
     assert before == [sha256(path.read_bytes()).hexdigest() for path in paths]
 
 
-def test_refuses_existing_books_with_legacy_mandate_before_mutation(
+def test_refuses_mixed_pilot_instruments_and_legacy_mandate_before_mutation(
     tmp_path: Path,
 ) -> None:
     from hashlib import sha256

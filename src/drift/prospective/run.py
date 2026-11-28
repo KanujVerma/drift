@@ -52,6 +52,8 @@ from drift.prospective.config import (
     active_models,
     eligibility_message,
     in_settlement_window,
+    instruments,
+    mandate,
     observation_date,
     observation_dates,
     pilot_instruments,
@@ -214,8 +216,37 @@ def book_dir(state: Path, role: str) -> Path:
     return path
 
 
+def _original_legacy_book(root: Path, packet: ResearchPacket, rules: object) -> bool:
+    """Recognize original v0.2 observations without reclassifying newer pilots."""
+    from drift.prospective.window import active_window
+
+    return (
+        root.name == "observation"
+        and active_window() is None
+        and packet.instruments == instruments()
+        and rules == mandate()
+    )
+
+
+def _refuse_legacy_writes(root: Path) -> None:
+    if root.name != "observation":
+        return
+    for name in MODELS:
+        path = root / f"{name}.sqlite"
+        if path.exists():
+            packet, rules, *_ = replay(
+                SQLiteLedger.open_existing(path).verified_events()
+            )
+            if _original_legacy_book(root, packet, rules):
+                raise ValueError(
+                    "legacy v0.2 observation books are read-only; "
+                    "the original mandate has no execution seal policy"
+                )
+
+
 def _validate_existing_books(root: Path) -> None:
-    """Do not mix a legacy mandate, divergent inputs, or a partly used book."""
+    """Do not mix mandates, divergent inputs, or a partly used book."""
+    _refuse_legacy_writes(root)
     present = [
         root / f"{name}.sqlite"
         for name in active_models()
@@ -253,6 +284,7 @@ def recover_shared_inputs(state: Path, role: str) -> None:
 def _record_corporate_action_status(
     root: Path, when: datetime, status: str, *, coverage_at: datetime | None = None
 ) -> None:
+    _refuse_legacy_writes(root)
     if status not in {"complete", "unavailable"} or when.tzinfo is None:
         raise ValueError("invalid corporate action coverage status")
     stamp = when.astimezone(UTC)
@@ -641,6 +673,7 @@ def resolve_expired_review(
     state: Path, name: str, proposal_id: str, reason: str
 ) -> dict[str, str]:
     """Record an explicit missed review without inventing a model decision."""
+    _refuse_legacy_writes(state / "observation")
     if name not in active_models() or not reason.strip():
         raise ValueError("resolution requires a known model and a nonempty reason")
     path = state / "observation" / f"{name}.sqlite"
@@ -711,6 +744,7 @@ def restore_pending_observation_reviews(state: Path) -> list[str]:
     """Restore missing receipt artifacts from their already recorded review."""
     pending = pending_observation_reviews(state)
     root = state / "observation"
+    _refuse_legacy_writes(root)
     _verify_paired_review_aliases(root)
     for name in pending:
         path = root / f"{name}.sqlite"
@@ -1009,6 +1043,7 @@ def _archive_review(
 def open_books(state: Path, role: str, packet: ResearchPacket) -> dict[str, str]:
     """Create configured ledgers, or reopen the same packet and mandate."""
     root = book_dir(state, role)
+    _refuse_legacy_writes(root)
     opened: dict[str, str] = {}
     rules = readiness_mandate() if role == "readiness" else pilot_mandate()
     for name in active_models():
@@ -1026,6 +1061,7 @@ def open_books(state: Path, role: str, packet: ResearchPacket) -> dict[str, str]
 def ingest_new(state: Path, role: str, collection: Collection) -> dict[str, object]:
     """Append inputs the book does not already have. Same batch, separate ledgers."""
     root = book_dir(state, role)
+    _refuse_legacy_writes(root)
     results: dict[str, object] = {}
     incoming = {
         _price_feed_label(item.source_label)
@@ -1133,6 +1169,7 @@ def export_contexts(state: Path, role: str, as_of: datetime) -> dict[str, str]:
     if role == "observation" and observation_date(as_of) is None:
         raise ValueError("review time is outside an observation session")
     root = book_dir(state, role)
+    _refuse_legacy_writes(root)
     if role == "observation":
         _verify_paired_review_aliases(root)
     written: dict[str, str] = {}
@@ -1297,6 +1334,7 @@ def apply_proposal(
     proposal_path: Path,
 ) -> Json:
     """Record one model's proposal on that model's ledger only."""
+    _refuse_legacy_writes(state / role)
     if name not in active_models():
         message = f"unknown model {name}"
         raise ValueError(message)
@@ -1668,6 +1706,7 @@ def status_report(state: Path, role: str, as_of: datetime) -> dict[str, Json]:
     trusted: dict[str, Json] = {}
     sessions: dict[str, Json] = {}
     session_days: list[set[str]] = []
+    legacy_read_only: list[Json] = []
     for name in active_models():
         path = book_dir(state, role) / f"{name}.sqlite"
         if not path.exists():
@@ -1679,6 +1718,12 @@ def status_report(state: Path, role: str, as_of: datetime) -> dict[str, Json]:
                 session_days.append(set())
             continue
         manager = PortfolioManager.recover(path)
+        if role == "observation":
+            original, rules, *_ = replay(
+                SQLiteLedger.open_existing(path).verified_events()
+            )
+            if _original_legacy_book(path.parent, original, rules):
+                legacy_read_only.append(name)
         report = manager.report(as_of)
         context = manager.context(as_of)
         recorded = context.get("decisions") if isinstance(context, dict) else None
@@ -1711,6 +1756,7 @@ def status_report(state: Path, role: str, as_of: datetime) -> dict[str, Json]:
         "counts_toward_observation": False,
         "completed_session_count": 0 if not completed_days else None,
         "model_identity_verification": "not_verified",
+        **({"legacy_read_only_books": legacy_read_only} if legacy_read_only else {}),
         **(
             {
                 "recorded_session_count": len(completed_days),
