@@ -850,6 +850,13 @@ def test_relative_state_uses_stable_absolute_context_paths(
     monkeypatch.chdir(working)
     when = datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
     received = datetime(2026, 11, 27, 13, 0, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return when
+
+    monkeypatch.setattr("drift.prospective.__main__.datetime", Clock)
     monkeypatch.setattr(window, "_clock", lambda: received)
     monkeypatch.setattr(window, "_fetch_nyse", lambda: (_nyse_html(), received))
     window.configure_window(tmp_path / "state")
