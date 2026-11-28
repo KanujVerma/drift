@@ -1,5 +1,6 @@
 """Opening feed must support later valuation without rewriting old books."""
 
+from argparse import Namespace
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,60 @@ from drift.prospective.collect import Bar, Collection, Filing, build_packet
 from drift.prospective.config import pilot_mandate
 from drift.prospective.locking import pilot_lock
 from drift.prospective.run import ingest_new, open_books, perform_daily
+
+
+@pytest.mark.parametrize("role", ["observation", "readiness"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_daily_cli_preserves_collection_when_opening_feed_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str, existing: bool
+) -> None:
+    from typing import Any
+
+    from drift.prospective.__main__ import _run
+
+    received = datetime(2026, 11, 27, 20, tzinfo=UTC)
+    monkeypatch.setattr(window, "_fetch_nyse", lambda: (_nyse_html(), received))
+    monkeypatch.setattr(window, "_clock", lambda: received)
+    window.configure_window(tmp_path)
+    now = datetime(2026, 11, 30, 16, tzinfo=UTC)
+    if existing:
+        from drift.prospective.config import readiness_mandate
+
+        with pilot_lock(tmp_path):
+            packet = build_packet(
+                non_price_collection(now), readiness=role == "readiness"
+            )
+            root = tmp_path / role
+            root.mkdir()
+            rules = readiness_mandate() if role == "readiness" else pilot_mandate()
+            PortfolioManager.open(root / "sol.sqlite", packet, rules)
+            events = SQLiteLedger.open_existing(root / "sol.sqlite").verified_events()
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return now
+
+    monkeypatch.setattr("drift.prospective.__main__.datetime", Clock)
+    monkeypatch.setattr(window, "verify_current_window", lambda _state: None)
+    monkeypatch.setattr(
+        "drift.prospective.__main__.collect_live",
+        lambda *_args, **_kwargs: non_price_collection(now),
+    )
+    saved = tmp_path / "collection.json"
+    saved.write_text("original collection", encoding="utf-8")
+    with pytest.raises(ValueError, match="opening.*feed"):
+        _run(
+            Namespace(command="daily", role=role, state=tmp_path, proposal=[], now=None)
+        )
+    assert saved.read_text(encoding="utf-8") == "original collection"
+    if existing:
+        assert (
+            SQLiteLedger.open_existing(tmp_path / role / "sol.sqlite").verified_events()
+            == events
+        )
+    else:
+        assert not (tmp_path / role).exists()
 
 
 def non_price_collection(now: datetime) -> Collection:

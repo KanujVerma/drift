@@ -23,8 +23,10 @@ from drift.prospective.config import (
     eligibility_message,
     in_settlement_window,
     observation_date,
+    observation_dates,
 )
 from drift.prospective.run import (
+    _validate_opening_feed,
     apply_proposal,
     pending_benchmark_after,
     pending_observation_reviews,
@@ -182,6 +184,12 @@ def _run_locked(args: argparse.Namespace) -> dict[str, object]:
                 "eligibility": "configure a source-checked future window first",
             }
     pending: list[str] = []
+    if args.command == "daily" and args.role == "readiness":
+        from drift.prospective.window import active_window
+
+        configured = active_window()
+        if configured is not None and configured.mode == "single-sol":
+            recover_shared_inputs(args.state, args.role)
     if args.command == "daily" and args.role == "observation":
         recover_shared_inputs(args.state, args.role)
         pending = pending_observation_reviews(args.state)
@@ -346,6 +354,30 @@ def _run_locked(args: argparse.Namespace) -> dict[str, object]:
             )
     if suggestions_path is not None:
         collection = replace(collection, suggestions=suggestions)
+    # Preserve the prior collection report if a new single-Sol book cannot open.
+    # perform_daily also validates, including for callers outside this CLI.
+    from drift.prospective.window import active_window
+
+    configured = active_window()
+    if (
+        configured is not None
+        and configured.mode == "single-sol"
+        and collection.corporate_actions_complete
+        and collection.corporate_actions_received_at is not None
+        and (
+            args.role == "readiness"
+            or observation_date(moment) == observation_dates()[0]
+        )
+        and not any(
+            (args.state / args.role / f"{name}.sqlite").exists()
+            for name in active_models()
+        )
+    ):
+        from drift.prospective.collect import build_packet
+
+        _validate_opening_feed(
+            build_packet(collection, readiness=args.role == "readiness")
+        )
     report = _write_collection(args.state, collection)
     proposals = _proposals(args.proposal)
     outcome = perform_daily(
