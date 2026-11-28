@@ -1740,6 +1740,50 @@ def test_regression_partial_sale_then_valid_buy(tmp_path: Path) -> None:
     assert _snapshot(liquidation)["holdings"] == []
 
 
+def test_exit_signal_lifecycle_after_partial_full_sale_and_rebuy(
+    tmp_path: Path,
+) -> None:
+    manager, _ = _open(tmp_path)
+    buy = _proposal(quantity=2)
+    assert _mapping(manager.propose(buy))["status"] == "accepted"
+    rejected = _proposal(
+        proposal_id=deterministic_memory_uuid7("lifecycle-rejected"),
+        as_of=BUY_AT + timedelta(minutes=1),
+        evidence_ids=("missing",),
+    )
+    assert _mapping(manager.propose(rejected))["status"] == "rejected"
+    partial = _proposal(
+        proposal_id=deterministic_memory_uuid7("lifecycle-partial"),
+        as_of=BUY_AT + timedelta(minutes=2),
+        action="sell",
+        quantity=1,
+    )
+    assert _mapping(manager.propose(partial))["status"] == "accepted"
+    ctx = _mapping(manager.context(partial.as_of, include_exit_conditions=True))
+    assert (
+        _rows(ctx["decisions"])[0]["exit_conditions_status"]
+        == "review_current_position"
+    )
+    assert _rows(ctx["decisions"])[1]["exit_conditions_status"] == "proposal_only"
+    full = _proposal(
+        proposal_id=deterministic_memory_uuid7("lifecycle-full"),
+        as_of=BUY_AT + timedelta(minutes=3),
+        action="sell",
+        quantity=1,
+    )
+    assert _mapping(manager.propose(full))["status"] == "accepted"
+    rebuy = _proposal(
+        proposal_id=deterministic_memory_uuid7("lifecycle-rebuy"),
+        as_of=BUY_AT + timedelta(minutes=4),
+        quantity=1,
+    )
+    assert _mapping(manager.propose(rebuy))["status"] == "accepted"
+    ctx = _mapping(manager.context(rebuy.as_of, include_exit_conditions=True))
+    decisions = _rows(ctx["decisions"])
+    assert decisions[0]["exit_conditions_status"] == "retired_after_full_sale"
+    assert decisions[-1]["exit_conditions_status"] == "review_current_position"
+
+
 def test_repeated_partial_sales_fees_rebuy_and_liquidation_conserve_basis(
     tmp_path: Path,
 ) -> None:
@@ -1850,3 +1894,102 @@ def test_system_cost_report_ignores_caller_decimal_context(tmp_path: Path) -> No
         actual = _mapping(_mapping(manager.report(BUY_AT))["system_costs"])
     assert actual == expected
     assert actual["amount"] == "12.34"
+
+
+def test_partial_sale_can_report_exact_marked_nav_when_unrealized_is_inexact(
+    tmp_path: Path,
+) -> None:
+    packet = _packet()
+    mandate = _mandate().model_copy(update={"allowed_symbols": ("ACME", "BETA")})
+    manager, _ = PortfolioManager.open(tmp_path / "partial-nav.sqlite", packet, mandate)
+    assert _mapping(manager.propose(_proposal(quantity=7)))["status"] == "accepted"
+    assert (
+        _mapping(
+            manager.propose(
+                _proposal(
+                    proposal_id=deterministic_memory_uuid7("partial-nav-beta"),
+                    as_of=BUY_AT + timedelta(minutes=1),
+                    symbol="BETA",
+                    quantity=31,
+                    evidence_ids=("ev-beta",),
+                )
+            )
+        )["status"]
+        == "accepted"
+    )
+    assert (
+        _mapping(
+            manager.propose(
+                _proposal(
+                    proposal_id=deterministic_memory_uuid7("partial-nav-sell"),
+                    as_of=BUY_AT + timedelta(minutes=2),
+                    action="sell",
+                    quantity=2,
+                )
+            )
+        )["status"]
+        == "accepted"
+    )
+    unmarked = _mapping(
+        manager.context(BUY_AT + timedelta(minutes=3), include_exact_nav=True)
+    )
+    assert "independent_marked_value" not in unmarked
+    assert _mapping(manager.mark(MARK_AT))["status"] == "marked"
+    report = _mapping(manager.report(MARK_AT))
+    assert report["valuation"] == "unavailable"
+    assert report["net_asset_value"] is None
+    assert report["unrealized_pnl"] is None
+    default = _mapping(manager.context(MARK_AT))
+    assert "independent_marked_value" not in default
+    context = _mapping(manager.context(MARK_AT, include_exact_nav=True))
+    book = _mapping(context["book"])
+    assert book["valuation"] == "unavailable"
+    assert book["net_asset_value"] is None
+    separate = _mapping(context["independent_marked_value"])
+    assert separate["holdings_market_value"] == "2050"
+    assert separate["net_asset_value"] == "9997"
+    assert separate["unrealized_pnl"] is None
+    assert "not an accounting valuation" in str(separate["limitation"])
+    stale = _mapping(manager.context(TUESDAY_AT, include_exact_nav=True))
+    assert "independent_marked_value" not in stale
+
+    from decimal import Decimal
+    from types import SimpleNamespace
+    from typing import cast
+
+    from drift.evaluator.portfolio import PortfolioAccountingKernel
+    from drift.manager.book import replay
+    from drift.manager.service import _independent_marked_value
+
+    *_unused, kernel = replay(manager._ledger.verified_events())
+    state = kernel.state
+    values = {
+        "mark": state.mark,
+        "holdings": state.holdings,
+        "holdings_market_value": state.holdings_market_value,
+        "pending_cash_claims": state.pending_cash_claims,
+        "pending_claims_value": state.pending_claims_value,
+        "cash_balance": state.cash_balance,
+        "net_asset_value": state.net_asset_value,
+    }
+    corrupt_nav = SimpleNamespace(
+        **{**values, "net_asset_value": state.net_asset_value + Decimal("1")}
+    )
+    corrupt_market = SimpleNamespace(
+        **{
+            **values,
+            "holdings_market_value": state.holdings_market_value + Decimal("1"),
+        }
+    )
+    assert (
+        _independent_marked_value(
+            cast(PortfolioAccountingKernel, SimpleNamespace(state=corrupt_nav))
+        )
+        is None
+    )
+    assert (
+        _independent_marked_value(
+            cast(PortfolioAccountingKernel, SimpleNamespace(state=corrupt_market))
+        )
+        is None
+    )

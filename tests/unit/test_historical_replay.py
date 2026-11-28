@@ -175,6 +175,36 @@ def test_historical_state_cannot_use_the_prospective_directory(tmp_path: Path) -
         assert_isolated(tmp_path / "prospective")
 
 
+@pytest.mark.parametrize("name", ["prospective-single-sol", "prospective-pilot"])
+def test_historical_state_rejects_named_pilot_directories_and_descendants(
+    tmp_path: Path, name: str
+) -> None:
+    pilot = tmp_path / name
+    pilot.mkdir()
+    alias = tmp_path / "pilot-alias"
+    alias.symlink_to(pilot, target_is_directory=True)
+    for state in (pilot, pilot / "historical", alias / "historical"):
+        with pytest.raises(ValueError, match="prospective"):
+            assert_isolated(state)
+
+
+def test_historical_state_rejects_custom_pilot_root(tmp_path: Path) -> None:
+    pilot = tmp_path / "my-trading-book"
+    (pilot / "observation").mkdir(parents=True)
+    (pilot / "window.json").write_text("{}")
+    with pytest.raises(ValueError, match="prospective"):
+        assert_isolated(pilot / "nested")
+
+
+def test_historical_state_rejects_custom_pilot_without_window_marker(
+    tmp_path: Path,
+) -> None:
+    pilot = tmp_path / "custom-book"
+    (pilot / "observation").mkdir(parents=True)
+    with pytest.raises(ValueError, match="prospective"):
+        assert_isolated(pilot / "observation" / "nested")
+
+
 def test_constrained_passive_respects_the_position_cap() -> None:
     control = constrained_passive("100", "110")
     assert control["shares"] == "24"

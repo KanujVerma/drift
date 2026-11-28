@@ -876,7 +876,13 @@ class PortfolioManager:
         )
 
     @_serialize_pilot_book
-    def context(self, as_of: datetime) -> Json:
+    def context(
+        self,
+        as_of: datetime,
+        *,
+        include_exit_conditions: bool = False,
+        include_exact_nav: bool = False,
+    ) -> Json:
         """Point-in-time inputs, decisions, and outcomes for a later review."""
         events = self._ledger.verified_events()
         packet, mandate, *_rest, kernel = replay(events, until=as_of)
@@ -885,6 +891,41 @@ class PortfolioManager:
         feedback: list[Json] = []
         reflections: list[Json] = []
         settlements = _settlements(events, as_of)
+        signal_fills: dict[str, int] = {}
+        last_flat: dict[str, int] = {}
+        if include_exit_conditions:
+            instruments = {
+                str(item.security_id): item.symbol for item in packet.instruments
+            }
+            for index, event in enumerate(events):
+                if event.timestamp > as_of or event.event_type not in {DECISION, FILL}:
+                    continue
+                fill_payload = thaw(event.payload)
+                fill = fill_payload.get("fill")
+                if not isinstance(fill, dict):
+                    continue
+                proposal = fill_payload.get("proposal")
+                proposal_id = fill_payload.get("proposal_id")
+                if isinstance(proposal, dict):
+                    proposal_id = proposal.get("proposal_id")
+                if isinstance(proposal_id, str):
+                    signal_fills[proposal_id] = index
+                fill_symbol = instruments.get(str(fill.get("security_id")))
+                snapshot = fill_payload.get("snapshot")
+                if (
+                    fill_symbol
+                    and fill.get("side") == "sell"
+                    and isinstance(snapshot, dict)
+                ):
+                    holdings = snapshot.get("holdings")
+                    if isinstance(holdings, list) and not any(
+                        isinstance(row, dict)
+                        and row.get("symbol") == fill_symbol
+                        and isinstance(quantity := row.get("quantity"), int)
+                        and quantity > 0
+                        for row in holdings
+                    ):
+                        last_flat[fill_symbol] = index
         invalidated_proposals = (
             _invalidated_execution_proposals(packet, events, as_of)
             if _pilot_book(mandate)
@@ -904,6 +945,14 @@ class PortfolioManager:
             if event.event_type == DECISION:
                 view = _decision_context(payload)
                 proposal = payload.get("proposal")
+                if (
+                    include_exit_conditions
+                    and isinstance(view, dict)
+                    and isinstance(proposal, dict)
+                ):
+                    conditions = proposal.get("exit_conditions")
+                    if isinstance(conditions, list):
+                        view["exit_conditions"] = conditions
                 proposal_id = (
                     proposal.get("proposal_id") if isinstance(proposal, dict) else None
                 )
@@ -926,6 +975,29 @@ class PortfolioManager:
                         "settlement_status": "invalidated",
                         "fill": None,
                     }
+                if (
+                    include_exit_conditions
+                    and isinstance(view, dict)
+                    and "exit_conditions" in view
+                ):
+                    symbol = view.get("symbol")
+                    fill_index = (
+                        signal_fills.get(proposal_id)
+                        if isinstance(proposal_id, str)
+                        else None
+                    )
+                    if view.get("status") != "accepted" or view.get("action") != "buy":
+                        signal_status = "proposal_only"
+                    elif fill_index is None:
+                        signal_status = "unfilled"
+                    elif (
+                        isinstance(symbol, str)
+                        and last_flat.get(symbol, -1) > fill_index
+                    ):
+                        signal_status = "retired_after_full_sale"
+                    else:
+                        signal_status = "review_current_position"
+                    view["exit_conditions_status"] = signal_status
                 decisions.append(view)
             elif event.event_type == FEEDBACK:
                 note = payload.get("feedback")
@@ -1008,6 +1080,17 @@ class PortfolioManager:
             "reflections": reflections,
             "untrusted_text": True,
         }
+        if (
+            include_exact_nav
+            and not _pilot_book(mandate)
+            and isinstance(book, dict)
+            and book.get("valuation_reason")
+            == "unrealized result is not exact in the portfolio decimal context"
+            and session_for(packet, as_of) == kernel.state.session_key.local_date
+        ):
+            independent = _independent_marked_value(kernel)
+            if independent is not None:
+                body["independent_marked_value"] = independent
         return body
 
     @_serialize_pilot_book
@@ -1962,6 +2045,46 @@ def _unadjusted_split_holdings(
                 affected.add(symbol)
                 break
     return affected
+
+
+def _independent_marked_value(kernel: PortfolioAccountingKernel) -> Json:
+    """Return exact marked value independently; never infer unrealized P&L."""
+    state = kernel.state
+    if state.mark is None or not state.holdings:
+        return None
+    prices = {item.security_id: item.close_price for item in state.mark.prices}
+    if set(prices) != {holding.security_id for holding in state.holdings}:
+        return None
+    exact_market = sum(
+        (
+            Fraction(prices[holding.security_id]) * holding.quantity
+            for holding in state.holdings
+        ),
+        Fraction(0),
+    )
+    exact_claims = sum(
+        (Fraction(claim.total_cash_expected) for claim in state.pending_cash_claims),
+        Fraction(0),
+    )
+    if (
+        Fraction(state.holdings_market_value) != exact_market
+        or Fraction(state.pending_claims_value) != exact_claims
+        or Fraction(state.net_asset_value)
+        != Fraction(state.cash_balance) + exact_market + exact_claims
+    ):
+        return None
+    return {
+        "cash": money_text(state.cash_balance),
+        "holdings_market_value": money_text(state.holdings_market_value),
+        "pending_claims_value": money_text(state.pending_claims_value),
+        "net_asset_value": money_text(state.net_asset_value),
+        "unrealized_pnl": None,
+        "limitation": (
+            "Exact cash plus marked holdings and pending claims only; "
+            "not an accounting valuation. "
+            "Unrealized P&L remains unavailable and all risk checks are unchanged."
+        ),
+    }
 
 
 def _valuation(
