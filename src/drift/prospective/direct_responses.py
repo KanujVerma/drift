@@ -1,4 +1,4 @@
-"""Supervised ChatGPT-plan request preparation, with live billing gate closed."""
+"""ChatGPT-plan requests with one-time supervised account setup."""
 
 from __future__ import annotations
 
@@ -226,7 +226,7 @@ def load_session(path: Path, *, expected_subject: str, now: datetime) -> PlanSes
     )
 
 
-def verify_session_identity(session: PlanSession, http: httpx.Client) -> None:
+def verify_session_identity(session: PlanSession, http: httpx.Client) -> str:
     """Revalidate the retained ID token using OpenAI's current signing keys."""
     try:
         header = jwt.get_unverified_header(session.id_token)
@@ -275,11 +275,106 @@ def verify_session_identity(session: PlanSession, http: httpx.Client) -> None:
         raise ValueError(
             "Drift signed account identity could not be verified"
         ) from None
+    email = claims.get("email")
+    if (
+        not isinstance(email, str)
+        or not email.isascii()
+        or not 3 <= len(email) <= 254
+        or email.count("@") != 1
+        or any(ord(char) <= 32 or ord(char) == 127 for char in email)
+        or claims.get("email_verified") is not True
+    ):
+        raise ValueError("signed identity lacks a usable verified email")
+    return email
 
 
-def _require_no_extra_billing(_session: PlanSession) -> None:
-    """No trusted account-specific control verifier has been implemented yet."""
-    raise RuntimeError("live inference requires verified no-extra-billing controls")
+def _billing_path() -> Path:
+    return Path.home() / ".local/share/drift/chatgpt-signin/billing-setup.json"
+
+
+def _require_no_extra_billing(session: PlanSession, email: str) -> None:
+    """Require the operator's one-time statement for this signed identity.
+
+    This record does not verify the provider's current settings.
+    """
+    path = _billing_path()
+    try:
+        parent = path.parent.lstat()
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.getuid()
+            or parent.st_mode & 0o077
+        ):
+            raise ValueError("private directory required")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+                or info.st_size > 4096
+            ):
+                raise ValueError("private record required")
+            record = json.load(handle)
+        if record != {
+            "version": 1,
+            "subject": session.subject,
+            "client_id": session.client_id,
+            "verified_email": email,
+            "attestation": "personal-plan-no-app-credits-no-auto-reload",
+        }:
+            raise ValueError("setup does not match signed identity")
+    except OSError, ValueError, UnicodeDecodeError:
+        raise RuntimeError("matching no-extra-billing setup required") from None
+
+
+def setup_billing(*, expected_subject: str) -> None:
+    """Record one terminal operator's point-in-time account and settings check."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise RuntimeError("setup requires an interactive terminal")
+    path = Path.home() / ".local/share/drift/chatgpt-signin/auth.json"
+    session = load_session(
+        path, expected_subject=expected_subject, now=datetime.now(UTC)
+    )
+    with httpx.Client(follow_redirects=False, trust_env=False) as http:
+        email = verify_session_identity(session, http)
+    print(f"Verified Drift account email: {email}")
+    print(
+        "In ChatGPT settings, check the SAME personal account and its saved settings: "
+        "credit balance is zero, app credit use is off and automatic credit "
+        "reload is off. Stop if any "
+        "account or setting is unclear. This is a one-time operator statement; "
+        "Drift cannot continuously verify those settings."
+    )
+    try:
+        observed = input("Type the account email shown in ChatGPT settings: ")
+        confirmed = input("Type I CHECKED to attest to the checks above: ")
+    except EOFError, KeyboardInterrupt:
+        raise RuntimeError("setup was not confirmed") from None
+    if observed != email or confirmed != "I CHECKED":
+        raise RuntimeError("setup was not confirmed or account did not match")
+    # Recheck token validity after the operator's potentially long inspection.
+    with httpx.Client(follow_redirects=False, trust_env=False) as http:
+        if verify_session_identity(
+            session, http
+        ) != email or session.expires_at <= datetime.now(UTC):
+            raise RuntimeError("signed identity expired or changed during setup")
+    record = {
+        "version": 1,
+        "subject": session.subject,
+        "client_id": session.client_id,
+        "verified_email": email,
+        "attestation": "personal-plan-no-app-credits-no-auto-reload",
+    }
+    # Exclusive creation avoids silently replacing an existing account binding.
+    fd = os.open(
+        _billing_path(), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _record_attempt(state: Path, review: SavedReview, session: PlanSession) -> None:
@@ -319,7 +414,7 @@ def _record_attempt(state: Path, review: SavedReview, session: PlanSession) -> N
 
 
 def live_request(state: Path, *, expected_subject: str) -> dict[str, Any]:
-    """Run a supervised request after the no-extra-billing gate is implemented."""
+    """Run one request for a review after identity and setup checks."""
     state = state.resolve()
     if state.is_relative_to(Path(__file__).resolve().parents[3]):
         raise ValueError("prospective state must be outside the source tree")
@@ -329,9 +424,9 @@ def live_request(state: Path, *, expected_subject: str) -> dict[str, Any]:
     session = load_session(
         path, expected_subject=expected_subject, now=datetime.now(UTC)
     )
-    _require_no_extra_billing(session)
     with httpx.Client(follow_redirects=False, trust_env=False) as identity_http:
-        verify_session_identity(session, identity_http)
+        email = verify_session_identity(session, identity_http)
+    _require_no_extra_billing(session, email)
     if any(
         os.environ.get(name)
         for name in (
@@ -511,11 +606,31 @@ def _request(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Supervised direct Responses request")
-    parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--state", type=Path)
     parser.add_argument("--expected-subject", required=True)
+    parser.add_argument("--setup-billing", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.setup_billing:
+            if args.state is not None:
+                parser.error("--state cannot be used with --setup-billing")
+            setup_billing(expected_subject=args.expected_subject)
+            print(
+                "One-time account setup recorded; provider settings are not monitored."
+            )
+            return 0
+        if args.state is None:
+            parser.error("--state is required for a request")
         result = live_request(args.state, expected_subject=args.expected_subject)
+    except ValueError as exc:
+        if str(exc) == "signed identity lacks a usable verified email":
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(
+            "Direct request unavailable; check authorization and billing controls.",
+            file=sys.stderr,
+        )
+        return 2
     except Exception:
         print(
             "Direct request unavailable; check authorization and billing controls.",

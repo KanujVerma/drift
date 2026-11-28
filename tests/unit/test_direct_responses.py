@@ -25,9 +25,11 @@ from drift.prospective.direct_responses import (
     PlanSession,
     _record_attempt,
     _request,
+    _require_no_extra_billing,
     live_request,
     load_session,
     saved_review,
+    setup_billing,
     verify_session_identity,
 )
 from drift.prospective.locking import pilot_lock
@@ -243,6 +245,10 @@ def test_live_path_is_blocked_before_network(
         raise AssertionError("network client must not be created")
 
     monkeypatch.setattr("drift.prospective.direct_responses.OpenAI", unexpected_client)
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.verify_session_identity",
+        lambda *a: "fixture@example.com",
+    )
     with pytest.raises(RuntimeError, match="no-extra-billing"):
         live_request(tmp_path, expected_subject="verified-subject")
 
@@ -325,6 +331,8 @@ def test_saved_session_identity_is_verified_against_signing_key(
         "iss": "https://auth.openai.com",
         "aud": "wrong" if bad == "audience" else "oaiapp_fixture",
         "sub": "wrong" if bad == "subject" else "verified-subject",
+        "email": "fixture@example.com",
+        "email_verified": True,
         "exp": datetime.now(UTC) + timedelta(seconds=-30 if bad == "expired" else 600),
     }
     if bad in {"bound", "wrong_hash"}:
@@ -467,11 +475,27 @@ def test_supervised_path_uses_shared_transport_and_persists_provenance(
     monkeypatch.setattr(
         "drift.prospective.direct_responses.load_session", lambda *a, **k: auth
     )
+    setup_dir = state / "setup-fixture"
+    setup_dir.mkdir(mode=0o700)
+    setup = setup_dir / "billing-setup.json"
+    setup.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "subject": auth.subject,
+                "client_id": auth.client_id,
+                "verified_email": "fixture@example.com",
+                "attestation": "personal-plan-no-app-credits-no-auto-reload",
+            }
+        )
+    )
+    setup.chmod(0o600)
     monkeypatch.setattr(
-        "drift.prospective.direct_responses._require_no_extra_billing", lambda *a: None
+        "drift.prospective.direct_responses._billing_path", lambda: setup
     )
     monkeypatch.setattr(
-        "drift.prospective.direct_responses.verify_session_identity", lambda *a: None
+        "drift.prospective.direct_responses.verify_session_identity",
+        lambda *a: "fixture@example.com",
     )
     monkeypatch.setattr(
         "drift.prospective.direct_responses.verify_current_window", lambda *a: None
@@ -697,3 +721,99 @@ def test_invalid_runtime_evidence_does_not_write_intent(
     with pytest.raises(ValueError, match="runtime evidence"):
         apply_proposal(state, "observation", "sol", path, runtime_evidence=invalid)
     assert ledger.verified_events() == before
+
+
+@pytest.mark.parametrize(
+    "email,verified",
+    [
+        (None, True),
+        ("fixture@example.com", False),
+        ("fixture@example.com", None),
+        ("evil\n@example.com", True),
+    ],
+)
+def test_identity_requires_safe_verified_email(
+    email: str | None, verified: bool | None
+) -> None:
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private.public_key()))
+    public.update({"kid": "fixture", "alg": "RS256", "use": "sig"})
+    claims = {
+        "iss": "https://auth.openai.com",
+        "aud": "oaiapp_fixture",
+        "sub": "verified-subject",
+        "exp": datetime.now(UTC) + timedelta(minutes=5),
+        "email": email,
+        "email_verified": verified,
+    }
+    token = jwt.encode(claims, private, algorithm="RS256", headers={"kid": "fixture"})
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, json={"keys": [public]})
+        )
+    ) as http:
+        with pytest.raises(ValueError, match="lacks a usable verified email"):
+            verify_session_identity(replace(session(), id_token=token), http)
+
+
+def test_billing_setup_requires_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.load_session",
+        lambda *a, **k: pytest.fail("must not load session"),
+    )
+    with pytest.raises(RuntimeError, match="interactive terminal"):
+        setup_billing(expected_subject="verified-subject")
+
+
+@pytest.mark.parametrize(
+    "answers,success",
+    [
+        (["different@example.com", "I CHECKED"], False),
+        (["fixture@example.com", "yes"], False),
+        (["fixture@example.com", "I CHECKED"], True),
+    ],
+)
+def test_one_time_setup_binds_verified_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answers: list[str], success: bool
+) -> None:
+    import builtins
+
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    path = directory / "billing-setup.json"
+    auth = replace(session(), expires_at=datetime.now(UTC) + timedelta(hours=1))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses._billing_path", lambda: path
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.load_session", lambda *a, **k: auth
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.verify_session_identity",
+        lambda *a: "fixture@example.com",
+    )
+    responses = iter(answers)
+    monkeypatch.setattr(builtins, "input", lambda _: next(responses))
+    if not success:
+        with pytest.raises(RuntimeError, match="not confirmed"):
+            setup_billing(expected_subject=auth.subject)
+        assert not path.exists()
+        return
+    setup_billing(expected_subject=auth.subject)
+    assert path.stat().st_mode & 0o777 == 0o600
+    _require_no_extra_billing(auth, "fixture@example.com")
+    for changed, email in [
+        (replace(auth, subject="other"), "fixture@example.com"),
+        (replace(auth, client_id="oaiapp_other"), "fixture@example.com"),
+        (auth, "other@example.com"),
+    ]:
+        with pytest.raises(RuntimeError, match="setup required"):
+            _require_no_extra_billing(changed, email)
+    path.chmod(0o644)
+    with pytest.raises(RuntimeError, match="setup required"):
+        _require_no_extra_billing(auth, "fixture@example.com")
