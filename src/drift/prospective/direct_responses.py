@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -21,9 +23,15 @@ import jwt
 from openai import OpenAI
 
 from drift.ledger.sqlite import SQLiteLedger
-from drift.manager.book import PROSPECTIVE_REVIEW, thaw
+from drift.manager.book import (
+    PROSPECTIVE_REQUEST_ATTEMPT,
+    PROSPECTIVE_REVIEW,
+    append_manager_event,
+    replay,
+    thaw,
+)
 from drift.manager.models import InvestmentProposal
-from drift.prospective.config import MODELS
+from drift.prospective.config import MODELS, submission_is_late
 from drift.prospective.locking import pilot_lock
 from drift.prospective.run import (
     Json,
@@ -256,6 +264,13 @@ def verify_session_identity(session: PlanSession, http: httpx.Client) -> None:
             or session.subject != session.expected_subject
         ):
             raise ValueError("signed identity does not match selected account")
+        if "at_hash" in claims:
+            digest = hashlib.sha256(session.token.encode("ascii")).digest()[:16]
+            expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+            if not isinstance(claims["at_hash"], str) or not hmac.compare_digest(
+                claims["at_hash"], expected
+            ):
+                raise ValueError("access token does not match signed identity")
     except Exception:
         raise ValueError(
             "Drift signed account identity could not be verified"
@@ -265,6 +280,42 @@ def verify_session_identity(session: PlanSession, http: httpx.Client) -> None:
 def _require_no_extra_billing(_session: PlanSession) -> None:
     """No trusted account-specific control verifier has been implemented yet."""
     raise RuntimeError("live inference requires verified no-extra-billing controls")
+
+
+def _record_attempt(state: Path, review: SavedReview, session: PlanSession) -> None:
+    """Commit an attempt before transmission while holding the pilot lock."""
+    ledger = SQLiteLedger(state / "observation" / "sol.sqlite", create_schema=False)
+    events = ledger.verified_events()
+    key = f"prospective-request-attempt:{review.proposal_id}"
+    if any(event.deduplication_key == key for event in events):
+        raise ValueError(
+            "request already attempted; resolve the review under supervision"
+        )
+    now = datetime.now(UTC)
+    if now < max(event.timestamp for event in events):
+        raise ValueError("request clock precedes recorded ledger activity")
+    source = next(
+        (event for event in events if event.event_hash == review.review_hash), None
+    )
+    if source is None or submission_is_late(source.timestamp, now):
+        raise ValueError("review has passed its submission cutoff")
+    _packet, _rules, _ph, _mh, book_id, _kernel = replay(events)
+    append_manager_event(
+        ledger,
+        book_id=book_id,
+        event_type=PROSPECTIVE_REQUEST_ATTEMPT,
+        dedup_key=key,
+        timestamp=now,
+        payload={
+            "proposal_id": review.proposal_id,
+            "review_hash": review.review_hash,
+            "account_subject_sha256": hashlib.sha256(
+                session.subject.encode()
+            ).hexdigest(),
+            "client_id": session.client_id,
+        },
+        expected_previous_hash=events[-1].event_hash,
+    )
 
 
 def live_request(state: Path, *, expected_subject: str) -> dict[str, Any]:
@@ -298,6 +349,7 @@ def live_request(state: Path, *, expected_subject: str) -> dict[str, Any]:
     with pilot_lock(state):
         verify_current_window(state)
         review = saved_review(state)
+        _record_attempt(state, review, session)
         with OpenAI(
             api_key=session.token,
             base_url="https://api.openai.com/v1",

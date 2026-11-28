@@ -1437,6 +1437,13 @@ def apply_proposal(
     if len(reviews) != 1:
         raise ValueError("review is not bound to this book")
     review = reviews[0]
+    if runtime_evidence is None and any(
+        event.deduplication_key == f"prospective-request-attempt:{receipt_id}"
+        for event in events
+    ):
+        raise ValueError(
+            "direct request attempted; resolve the review under supervision"
+        )
     if runtime_evidence is not None:
         fixed = {
             "route": "chatgpt-plan-responses",

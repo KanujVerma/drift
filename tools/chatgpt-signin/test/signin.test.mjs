@@ -41,6 +41,7 @@ async function fixture(options = {}) {
       assert.ok(body.get("code_verifier"));
       assert.equal(createHash("sha256").update(body.get("code_verifier")).digest("base64url"),
         authorization.searchParams.get("code_challenge"));
+      if (options.beforeToken) await options.beforeToken(path);
       return Response.json({ access_token: "fixture-access", refresh_token: "fixture-refresh",
         expires_in: 3600, scope: options.denyScope ? "openid email" :
           "openid email profile offline_access resource.invoke chatgpt.tokens.use.direct",
@@ -80,6 +81,65 @@ test("registers Drift and validates an authorized account without exposing token
     assert.equal((await stat(join(f.dir, "auth"))).mode & 0o777, 0o700);
     assert.equal(f.requests.length, 2);
   } finally { await rm(f.dir, { recursive: true, force: true }); }
+});
+
+for (const conflict of ["account", "registration"]) {
+  test(`a concurrent ${conflict} change cannot be overwritten`, async () => {
+    const f = await fixture({ beforeToken: async (path) => {
+      const current = JSON.parse(await readFile(path, "utf8"));
+      if (conflict === "account") current.account = { client_id: "oaiapp_fixture", subject: "other-subject" };
+      else current.registration = { client_id: "oaiapp_other" };
+      await writeFile(path, JSON.stringify(current), { mode: 0o600 });
+    }});
+    try {
+      await assert.rejects(f.auth.signIn({ say: f.say, port: 0, timeoutMs: 3000 }));
+      const saved = JSON.parse(await readFile(f.path, "utf8"));
+      if (conflict === "account") assert.equal(saved.account.subject, "other-subject");
+      else assert.equal(saved.registration.client_id, "oaiapp_other");
+      assert.equal(saved.tokens, undefined);
+    } finally { await rm(f.dir, { recursive: true, force: true }); }
+  });
+}
+
+test("concurrent first sign-ins cannot replace the winning account", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drift-signin-race-"));
+  const path = join(dir, "auth", "auth.json");
+  let arrivals = 0;
+  let release;
+  const bothArrived = new Promise((resolve) => { release = resolve; });
+  const start = (subject) => {
+    let authorization;
+    const fetchMock = async (url) => {
+      if (String(url).endsWith("/.well-known/jwks.json")) return Response.json({ keys: [key] });
+      if (String(url).endsWith("/oauth/token")) {
+        arrivals += 1;
+        if (arrivals === 2) release();
+        await bothArrived;
+        return Response.json({ access_token: `access-${subject}`, expires_in: 3600,
+          scope: "openid resource.invoke chatgpt.tokens.use.direct",
+          id_token: jwt("oaiapp_fixture", authorization.searchParams.get("nonce"), subject) });
+      }
+      throw new Error("unexpected external request");
+    };
+    const say = (text) => {
+      if (!text.startsWith("https://auth.openai.com/")) return;
+      authorization = new URL(text);
+      const callback = new URL(authorization.searchParams.get("redirect_uri"));
+      callback.searchParams.set("state", authorization.searchParams.get("state"));
+      callback.searchParams.set("code", "fixture-code");
+      callback.searchParams.set("client_id", "oaiapp_fixture");
+      setImmediate(() => { void fetch(callback).catch(() => {}); });
+    };
+    return new ChatGPTAuth({ path, fetch: fetchMock }).signIn({ say, port: 0, timeoutMs: 3000 });
+  };
+  try {
+    const outcomes = await Promise.allSettled([start("one"), start("two")]);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "rejected").length, 1);
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    assert.ok(["one", "two"].includes(saved.account.subject));
+    assert.equal(saved.tokens.access_token, `access-${saved.account.subject}`);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 for (const [name, subject] of [["same account", "fixture-subject"], ["different account", "wrong-subject"]]) {

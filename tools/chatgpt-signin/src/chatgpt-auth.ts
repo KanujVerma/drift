@@ -329,11 +329,15 @@ export class ChatGPTAuth {
       throw new ChatGPTAuthError(message("signin.notRegistered", NAMES));
     }
     // The registration is kept before the code is exchanged, so a failed exchange is retried with it.
-    if (issued !== data.registration?.client_id) {
-      await this.locked(async () =>
-        this.write({ ...(await this.read()), registration: { client_id: issued } }),
-      );
-    }
+    await this.locked(async () => {
+      const current = await this.read();
+      if (current.host_id !== hostId ||
+          (current.registration && current.registration.client_id !== issued) ||
+          (current.account && current.account.client_id !== issued)) {
+        throw new ChatGPTAuthError(message("signin.notRegistered", NAMES));
+      }
+      if (!current.registration) await this.write({ ...current, registration: { client_id: issued } });
+    });
     const keys = await this.signingKeys();
     const body = await this.tokenRequest(
       {
@@ -356,6 +360,10 @@ export class ChatGPTAuth {
     const tokens = tokenRecord(body, this.now());
     const replaced = await this.locked(async () => {
       const current = await this.read();
+      if (current.host_id !== hostId || current.registration?.client_id !== issued ||
+          (current.account && (current.account.client_id !== issued || current.account.subject !== claims.sub))) {
+        throw new ChatGPTAuthError(message("signin.otherAccount", { app: APP_NAME }));
+      }
       await this.write({
         host_id: hostId,
         registration: { client_id: issued },

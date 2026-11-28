@@ -1,7 +1,10 @@
 """Offline-only Responses adapter checks; no credentials or external calls."""
 
+import base64
+import hashlib
 import json
 import os
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,13 +23,15 @@ from drift.prospective.collect import Bar
 from drift.prospective.direct_responses import (
     PLAN_SCOPE,
     PlanSession,
+    _record_attempt,
     _request,
     live_request,
     load_session,
     saved_review,
     verify_session_identity,
 )
-from drift.prospective.run import apply_proposal, perform_daily
+from drift.prospective.locking import pilot_lock
+from drift.prospective.run import apply_proposal, perform_daily, resolve_expired_review
 
 
 @pytest.fixture
@@ -148,6 +153,7 @@ def test_inline_context_and_completed_response(review_state: tuple[Path, Any]) -
     assert body["model"] == "gpt-6.2-sol"
     assert body["reasoning"] == {"effort": "xhigh"}
     assert body["store"] is False and body["stream"] is True and body["tools"] == []
+    assert "max_output_tokens" not in body
     assert json.loads(body["input"][0]["content"]) == review.context
     assert "Context file:" not in body["instructions"]
 
@@ -301,7 +307,9 @@ def test_reads_only_matching_private_drift_session(tmp_path: Path) -> None:
         load_session(path, expected_subject="verified-subject", now=now)
 
 
-@pytest.mark.parametrize("bad", [None, "subject", "audience", "signature", "expired"])
+@pytest.mark.parametrize(
+    "bad", [None, "bound", "wrong_hash", "subject", "audience", "signature", "expired"]
+)
 def test_saved_session_identity_is_verified_against_signing_key(
     bad: str | None,
 ) -> None:
@@ -319,6 +327,13 @@ def test_saved_session_identity_is_verified_against_signing_key(
         "sub": "wrong" if bad == "subject" else "verified-subject",
         "exp": datetime.now(UTC) + timedelta(seconds=-30 if bad == "expired" else 600),
     }
+    if bad in {"bound", "wrong_hash"}:
+        value = b"fixture-oauth-token" if bad == "bound" else b"different-token"
+        claims["at_hash"] = (
+            base64.urlsafe_b64encode(hashlib.sha256(value).digest()[:16])
+            .rstrip(b"=")
+            .decode()
+        )
     token = jwt.encode(claims, signing, algorithm="RS256", headers={"kid": "fixture"})
     auth = replace(session(), id_token=token)
 
@@ -327,8 +342,11 @@ def test_saved_session_identity_is_verified_against_signing_key(
         return httpx.Response(200, json={"keys": [public]})
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-        if bad is None:
+        if bad in {None, "bound"}:
             verify_session_identity(auth, http)
+            if bad is None:
+                # Without at_hash, this verifies the ID token, not token pairing.
+                verify_session_identity(replace(auth, token="different-token"), http)
         else:
             with pytest.raises(ValueError, match="could not be verified"):
                 verify_session_identity(auth, http)
@@ -445,7 +463,7 @@ def test_supervised_path_uses_shared_transport_and_persists_provenance(
 ) -> None:
     state, review = review_state
     calls: list[httpx.Request] = []
-    auth = replace(session(), expires_at=datetime.now(UTC) + timedelta(days=1))
+    auth = replace(session(), expires_at=review.as_of + timedelta(days=1))
     monkeypatch.setattr(
         "drift.prospective.direct_responses.load_session", lambda *a, **k: auth
     )
@@ -476,6 +494,13 @@ def test_supervised_path_uses_shared_transport_and_persists_provenance(
             return next(clocks)
 
     monkeypatch.setattr("drift.prospective.run.datetime", Clock)
+
+    class RequestClock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return review.as_of + timedelta(minutes=4)
+
+    monkeypatch.setattr("drift.prospective.direct_responses.datetime", RequestClock)
     outcome = live_request(state, expected_subject="verified-subject")
     assert outcome["proposal"]["status"] == "accepted"
     assert outcome["runtime_evidence"]["response_id"] == "response-fixture"
@@ -490,6 +515,163 @@ def test_supervised_path_uses_shared_transport_and_persists_provenance(
         if event.event_type == "manager.prospective_intent"
     )
     assert thaw(intent.payload)["runtime_evidence"] == outcome["runtime_evidence"]
+
+
+@pytest.mark.parametrize("failure", [TimeoutError, SystemExit])
+def test_ambiguous_attempt_survives_failure_and_blocks_retry(
+    review_state: tuple[Path, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: type[BaseException],
+) -> None:
+    state, review = review_state
+    auth = replace(session(), expires_at=review.as_of + timedelta(days=1))
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.load_session", lambda *a, **k: auth
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses._require_no_extra_billing", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.verify_session_identity", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.verify_current_window", lambda *a: None
+    )
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return review.as_of + timedelta(minutes=4)
+
+    monkeypatch.setattr("drift.prospective.direct_responses.datetime", Clock)
+    calls: list[httpx.Request] = []
+
+    def interrupted(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200, json={"models": [{"slug": "gpt-6.2-sol", "visibility": "list"}]}
+            )
+        assert request.url.path == "/v1/responses"
+        ledger = SQLiteLedger.open_existing(state / "observation" / "sol.sqlite")
+        assert any(
+            e.deduplication_key == f"prospective-request-attempt:{review.proposal_id}"
+            for e in ledger.verified_events()
+        )
+        raise failure()
+
+    def client(**kwargs: object) -> OpenAI:
+        return OpenAI(
+            api_key="fixture-oauth-token",
+            base_url="https://api.openai.com/v1",
+            max_retries=0,
+            http_client=httpx.Client(transport=httpx.MockTransport(interrupted)),
+        )
+
+    monkeypatch.setattr("drift.prospective.direct_responses.OpenAI", client)
+    expected_error = ValueError if failure is TimeoutError else SystemExit
+    with pytest.raises(expected_error):
+        live_request(state, expected_subject="verified-subject")
+    with pytest.raises(ValueError, match="already attempted"):
+        live_request(state, expected_subject="verified-subject")
+    assert [call.url.path for call in calls] == ["/v1/models", "/v1/responses"]
+    path = state / "manual-proposal.json"
+    path.write_text(json.dumps(proposal(review)), encoding="utf-8")
+    with pytest.raises(ValueError, match="direct request attempted"):
+        apply_proposal(state, "observation", "sol", path)
+
+    class AfterCutoff(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return review.as_of + timedelta(days=2)
+
+    monkeypatch.setattr("drift.prospective.run.datetime", AfterCutoff)
+    outcome = resolve_expired_review(
+        state,
+        "sol",
+        review.proposal_id,
+        "ambiguous request abandoned under supervision",
+    )
+    assert outcome["status"] == "expired"
+    with pytest.raises(ValueError, match="resolved|submitted"):
+        saved_review(state)
+
+
+def test_parallel_requests_cannot_both_start(
+    review_state: tuple[Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, review = review_state
+    auth = replace(session(), expires_at=review.as_of + timedelta(days=1))
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.load_session", lambda *a, **k: auth
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses._require_no_extra_billing", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.verify_session_identity", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.verify_current_window", lambda *a: None
+    )
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return review.as_of + timedelta(minutes=4)
+
+    monkeypatch.setattr("drift.prospective.direct_responses.datetime", Clock)
+    monkeypatch.setattr(
+        "drift.prospective.direct_responses.OpenAI", lambda **k: client_for([], [])
+    )
+    entered, release = threading.Event(), threading.Event()
+
+    def interrupted(*args: object, **kwargs: object) -> None:
+        entered.set()
+        assert release.wait(5)
+        raise TimeoutError()
+
+    monkeypatch.setattr("drift.prospective.direct_responses._request", interrupted)
+    failures: list[BaseException] = []
+
+    def first() -> None:
+        try:
+            live_request(state, expected_subject="verified-subject")
+        except BaseException as error:
+            failures.append(error)
+
+    thread = threading.Thread(target=first)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        with pytest.raises(ValueError, match="busy"):
+            live_request(state, expected_subject="verified-subject")
+    finally:
+        release.set()
+        thread.join(5)
+    assert (
+        not thread.is_alive()
+        and len(failures) == 1
+        and isinstance(failures[0], TimeoutError)
+    )
+
+
+def test_expired_review_does_not_record_an_attempt(
+    review_state: tuple[Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, review = review_state
+    ledger = SQLiteLedger.open_existing(state / "observation" / "sol.sqlite")
+    before = ledger.verified_events()
+
+    class AfterCutoff(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return review.as_of + timedelta(days=2)
+
+    monkeypatch.setattr("drift.prospective.direct_responses.datetime", AfterCutoff)
+    with pilot_lock(state), pytest.raises(ValueError, match="cutoff"):
+        _record_attempt(state, review, session())
+    assert ledger.verified_events() == before
 
 
 def test_invalid_runtime_evidence_does_not_write_intent(
