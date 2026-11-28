@@ -404,6 +404,7 @@ def _record_attempt(state: Path, review: SavedReview, session: PlanSession) -> N
         payload={
             "proposal_id": review.proposal_id,
             "review_hash": review.review_hash,
+            "route": "chatgpt-plan-responses",
             "account_subject_sha256": hashlib.sha256(
                 session.subject.encode()
             ).hexdigest(),

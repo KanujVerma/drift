@@ -19,6 +19,7 @@ from test_prospective_pilot_safety import collection
 from test_prospective_single_sol import configured
 
 from drift.ledger.sqlite import SQLiteLedger
+from drift.manager.book import PROSPECTIVE_REQUEST_ATTEMPT, append_manager_event
 from drift.prospective.collect import Bar
 from drift.prospective.direct_responses import (
     PLAN_SCOPE,
@@ -437,6 +438,15 @@ def test_proposal_reuses_submission_and_seal(
             return next(clocks)
 
     monkeypatch.setattr("drift.prospective.run.datetime", Clock)
+
+    class RequestClock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return review.as_of + timedelta(minutes=4)
+
+    monkeypatch.setattr("drift.prospective.direct_responses.datetime", RequestClock)
+    with pilot_lock(state):
+        _record_attempt(state, review, session())
     evidence = {
         "route": result.route,
         "requested_model": result.requested_model,
@@ -464,6 +474,90 @@ def test_proposal_reuses_submission_and_seal(
     assert thaw(intent.payload)["runtime_evidence"] == evidence
     with pytest.raises(ValueError, match="resolved|submitted"):
         saved_review(state)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing",
+        "review",
+        "subject",
+        "client",
+        "route",
+        "proposal",
+        "key",
+        "type",
+        "duplicate",
+        "duplicate_review",
+    ],
+)
+def test_runtime_evidence_requires_matching_unique_attempt(
+    review_state: tuple[Path, Any], defect: str
+) -> None:
+    state, review = review_state
+    path = state / "generated-proposal.json"
+    path.write_text(json.dumps(proposal(review)), encoding="utf-8")
+    subject_hash = hashlib.sha256(session().subject.encode()).hexdigest()
+    evidence = {
+        "route": "chatgpt-plan-responses",
+        "requested_model": "gpt-6.2-sol",
+        "observed_model": "gpt-6.2-sol",
+        "requested_effort": "xhigh",
+        "observed_effort": "xhigh",
+        "response_id": "response-fixture",
+        "account_subject_sha256": subject_hash,
+        "client_id": session().client_id,
+        "review_hash": review.review_hash,
+    }
+    payload = {
+        "proposal_id": review.proposal_id,
+        "review_hash": review.review_hash,
+        "route": evidence["route"],
+        "account_subject_sha256": subject_hash,
+        "client_id": session().client_id,
+    }
+    field = {
+        "review": "review_hash",
+        "subject": "account_subject_sha256",
+        "client": "client_id",
+        "route": "route",
+        "proposal": "proposal_id",
+    }.get(defect)
+    if field:
+        payload[field] = "mismatch"
+    ledger = SQLiteLedger(state / "observation" / "sol.sqlite", create_schema=False)
+    if defect != "missing":
+        events = ledger.verified_events()
+        append_manager_event(
+            ledger,
+            book_id=events[0].entity_id,
+            event_type="manager.prospective_intent"
+            if defect == "type"
+            else PROSPECTIVE_REQUEST_ATTEMPT,
+            dedup_key="wrong-key"
+            if defect == "key"
+            else f"prospective-request-attempt:{review.proposal_id}",
+            timestamp=review.as_of + timedelta(minutes=4),
+            payload=payload,
+            expected_previous_hash=events[-1].event_hash,
+        )
+        if defect in {"duplicate", "duplicate_review"}:
+            events = ledger.verified_events()
+            if defect == "duplicate_review":
+                payload = {**payload, "proposal_id": "different-proposal"}
+            append_manager_event(
+                ledger,
+                book_id=events[0].entity_id,
+                event_type=PROSPECTIVE_REQUEST_ATTEMPT,
+                dedup_key="duplicate-attempt",
+                timestamp=review.as_of + timedelta(minutes=4),
+                payload=payload,
+                expected_previous_hash=events[-1].event_hash,
+            )
+    before = ledger.verified_events()
+    with pytest.raises(ValueError, match="request attempt"):
+        apply_proposal(state, "observation", "sol", path, runtime_evidence=evidence)
+    assert ledger.verified_events() == before
 
 
 def test_supervised_path_uses_shared_transport_and_persists_provenance(

@@ -25,6 +25,7 @@ from drift.manager.book import (
     PROSPECTIVE_CA_STATUS,
     PROSPECTIVE_EXPIRED,
     PROSPECTIVE_INTENT,
+    PROSPECTIVE_REQUEST_ATTEMPT,
     PROSPECTIVE_REVIEW,
     PROSPECTIVE_SEAL,
     append_manager_event,
@@ -1437,10 +1438,20 @@ def apply_proposal(
     if len(reviews) != 1:
         raise ValueError("review is not bound to this book")
     review = reviews[0]
-    if runtime_evidence is None and any(
-        event.deduplication_key == f"prospective-request-attempt:{receipt_id}"
+    attempt_key = f"prospective-request-attempt:{receipt_id}"
+    attempts = [
+        event
         for event in events
-    ):
+        if event.deduplication_key == attempt_key
+        or (
+            event.event_type == PROSPECTIVE_REQUEST_ATTEMPT
+            and (
+                thaw(event.payload).get("proposal_id") == receipt_id
+                or thaw(event.payload).get("review_hash") == review.event_hash
+            )
+        )
+    ]
+    if runtime_evidence is None and attempts:
         raise ValueError(
             "direct request attempted; resolve the review under supervision"
         )
@@ -1471,6 +1482,24 @@ def apply_proposal(
             )
         ):
             raise ValueError("direct runtime evidence is invalid")
+        if len(attempts) != 1:
+            raise ValueError("direct runtime evidence requires one request attempt")
+        attempt = attempts[0]
+        attempt_payload = thaw(attempt.payload)
+        if (
+            attempt.event_type != PROSPECTIVE_REQUEST_ATTEMPT
+            or attempt.deduplication_key != attempt_key
+            or events.index(attempt) <= events.index(review)
+            or attempt_payload
+            != {
+                "proposal_id": receipt_id,
+                "review_hash": review.event_hash,
+                "route": runtime_evidence["route"],
+                "account_subject_sha256": runtime_evidence["account_subject_sha256"],
+                "client_id": runtime_evidence["client_id"],
+            }
+        ):
+            raise ValueError("direct runtime evidence does not match request attempt")
     if observation_date(review.timestamp) is None:
         raise ValueError("review time is outside an observation session")
     saved = thaw(review.payload)
@@ -1557,6 +1586,10 @@ def apply_proposal(
                 and intent_payload.get("runtime_evidence") != runtime_evidence
             )
             or events.index(intent) <= events.index(review)
+            or (
+                runtime_evidence is not None
+                and events.index(intent) <= events.index(attempt)
+            )
         ):
             raise ValueError("proposal conflicts with saved submission intent")
     if decision is not None:
