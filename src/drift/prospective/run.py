@@ -128,8 +128,15 @@ def perform_daily(
                 "the configured first session has passed; establish a new window"
             ),
         }
-    root = book_dir(state, role)
+    root = state / role
     _validate_existing_books(root)
+    packet: ResearchPacket | None = None
+    if not any((root / f"{name}.sqlite").exists() for name in active_models()):
+        from drift.prospective.collect import build_packet
+
+        packet = build_packet(collection, readiness=role == "readiness")
+        _validate_opening_feed(packet)
+    root = book_dir(state, role)
     from drift.prospective.suggestions import store_suggestions
 
     store_suggestions(state, collection.suggestions, collection.collected_at)
@@ -145,9 +152,7 @@ def perform_daily(
             None,
         )
         if existing is None:
-            from drift.prospective.collect import build_packet
-
-            packet = build_packet(collection, readiness=role == "readiness")
+            assert packet is not None
         else:
             PortfolioManager.recover(existing)
             ledger = SQLiteLedger(existing, create_schema=False)
@@ -260,6 +265,7 @@ def _validate_existing_books(root: Path) -> None:
         ledger = SQLiteLedger(path, create_schema=False)
         events = ledger.verified_events()
         packet, rules, *_rest = replay(events)
+        _validate_opening_feed(packet)
         expected = readiness_mandate() if root.name == "readiness" else pilot_mandate()
         if rules != expected or packet.instruments != pilot_instruments():
             raise ValueError(f"{path.name} has an incompatible pilot configuration")
@@ -502,6 +508,33 @@ def _price_feed_label(label: str) -> str:
         if label in {f"alpaca-bars-v2-{feed}-raw", f"alpaca-trades-v2-{feed}"}:
             return f"alpaca-bars-v2-{feed}-raw"
     return label
+
+
+def _validate_opening_feed(packet: ResearchPacket) -> None:
+    """New single-Sol books need one usable, consistently pinned close feed."""
+    from drift.manager.service import _valid_pilot_close
+    from drift.prospective.window import active_window
+
+    window = active_window()
+    if window is None or window.mode != "single-sol":
+        return
+    feeds = {
+        _price_feed_label(item.source_label)
+        for item in packet.evidence
+        if item.price is not None
+    }
+    if len(feeds) != 1 or not any(
+        item.kind == "observation"
+        and item.price_role == "close"
+        and item.price is not None
+        and item.symbol is not None
+        and _valid_pilot_close(item, item.symbol, packet)
+        for item in packet.evidence
+    ):
+        raise ValueError(
+            "opening price feed requires one consistent Alpaca feed "
+            "with an eligible close; retain existing books and investigate"
+        )
 
 
 @serialized
@@ -1042,6 +1075,7 @@ def _archive_review(
 @serialized
 def open_books(state: Path, role: str, packet: ResearchPacket) -> dict[str, str]:
     """Create configured ledgers, or reopen the same packet and mandate."""
+    _validate_opening_feed(packet)
     root = book_dir(state, role)
     _refuse_legacy_writes(root)
     opened: dict[str, str] = {}
