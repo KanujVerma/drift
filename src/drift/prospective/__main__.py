@@ -2,8 +2,8 @@
 
 ``python -m drift.prospective --help``
 
-The process collects public inputs and updates two ledgers. It does not
-call a model. Pass proposal files produced by the supervising models.
+The process collects public inputs and updates the configured simulation. It does not
+call a model. Pass proposal files produced under supervision.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from drift.errors import LedgerIntegrityError
 from drift.manager.service import ManagerError
 from drift.prospective.collect import Collection, collect_live, load_suggestions
 from drift.prospective.config import (
+    active_models,
     eligibility_message,
     in_settlement_window,
     observation_date,
@@ -38,7 +39,7 @@ from drift.prospective.run import (
     used_trade_ids,
 )
 
-DEFAULT_STATE = Path.home() / ".local" / "share" / "drift" / "prospective-pilot"
+DEFAULT_STATE = Path.home() / ".local" / "share" / "drift" / "prospective-single-sol"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         "--proposal",
         action="append",
         default=[],
-        help="name=path, for example terra=terra.json",
+        help="name=path, for example sol=sol.json",
     )
     daily.add_argument(
         "--suggestions",
@@ -76,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     resolve.add_argument("--model", choices=("terra", "sol"), required=True)
     resolve.add_argument("--proposal-id", required=True)
     resolve.add_argument("--reason", required=True)
-    status = sub.add_parser("status", help="recover both books and report")
+    status = sub.add_parser("status", help="recover the book and report")
     _now(status)
     status.add_argument("--role", choices=("observation", "readiness"), required=True)
     args = parser.parse_args(argv)
@@ -141,12 +142,18 @@ def _run_locked(args: argparse.Namespace) -> dict[str, object]:
         )
     if args.command == "submit":
         proposals = _proposals(args.proposal)
+        if not set(proposals) <= set(active_models()):
+            raise ValueError("proposal names an inactive model")
         return {
             "proposals": {
                 name: apply_proposal(args.state, args.role, name, path)
                 for name, path in proposals.items()
             }
         }
+    if args.command == "daily" and not set(_proposals(args.proposal)) <= set(
+        active_models()
+    ):
+        raise ValueError("proposal names an inactive model")
     if args.command == "daily" and args.role == "observation" and args.proposal:
         raise ValueError("submit observation proposals before collecting new data")
     if args.command == "daily" and args.role == "observation":
@@ -162,6 +169,17 @@ def _run_locked(args: argparse.Namespace) -> dict[str, object]:
                     "configure a source-checked future window before "
                     "opening observation books"
                 ),
+            }
+    if args.command == "daily" and args.role == "readiness":
+        from drift.prospective.window import active_window
+
+        if active_window() is None and not any(
+            (args.state / "readiness" / f"{name}.sqlite").exists()
+            for name in ("terra", "sol")
+        ):
+            return {
+                "status": "window_not_configured",
+                "eligibility": "configure a source-checked future window first",
             }
     pending: list[str] = []
     if args.command == "daily" and args.role == "observation":

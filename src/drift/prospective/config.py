@@ -70,6 +70,14 @@ MODELS = {
 }
 
 
+def active_models() -> dict[str, str]:
+    """Use the bound mode; old windows and unconfigured legacy books stay paired."""
+    window = active_window()
+    if window is not None and window.mode == "single-sol":
+        return {"sol": MODELS["sol"]}
+    return MODELS
+
+
 def trading_dates(count: int) -> tuple[date, ...]:
     """Weekdays from the first eligible session, skipping listed holidays."""
     found: list[date] = []

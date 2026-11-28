@@ -882,7 +882,7 @@ def test_relative_state_uses_stable_absolute_context_paths(
             suggestions=None,
         )
     )
-    context = (tmp_path / "state" / "observation" / "terra" / "context.json").resolve()
+    context = (tmp_path / "state" / "observation" / "sol" / "context.json").resolve()
     prompt = (context.parent / "prompt.txt").read_text()
     assert f"Context file: {context}" in prompt
 

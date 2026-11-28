@@ -1,4 +1,4 @@
-"""Open two isolated books, export context, and record supervised proposals.
+"""Open configured books, export context, and record supervised proposals.
 
 The command does not call a model. A supervisor supplies each proposal file.
 Each book sees only its own ledger.
@@ -49,6 +49,7 @@ from drift.prospective.collect import (
 )
 from drift.prospective.config import (
     MODELS,
+    active_models,
     eligibility_message,
     in_settlement_window,
     observation_date,
@@ -88,7 +89,7 @@ def perform_daily(
         or collection.corporate_actions_received_at is None
     ):
         root = state / role
-        if all((root / f"{name}.sqlite").exists() for name in MODELS):
+        if all((root / f"{name}.sqlite").exists() for name in active_models()):
             _validate_existing_books(root)
             if collection.trade_invalidations:
                 notices_only = replace(
@@ -115,7 +116,9 @@ def perform_daily(
         role == "observation"
         and deciding
         and observation_date(moment) != observation_dates()[0]
-        and not any((state / role / f"{name}.sqlite").exists() for name in MODELS)
+        and not any(
+            (state / role / f"{name}.sqlite").exists() for name in active_models()
+        )
     ):
         return {
             "status": "fresh_window_required",
@@ -128,13 +131,13 @@ def perform_daily(
     from drift.prospective.suggestions import store_suggestions
 
     store_suggestions(state, collection.suggestions, collection.collected_at)
-    if all((root / f"{name}.sqlite").exists() for name in MODELS):
-        opened = dict.fromkeys(MODELS, "already_open")
+    if all((root / f"{name}.sqlite").exists() for name in active_models()):
+        opened = dict.fromkeys(active_models(), "already_open")
     else:
         existing = next(
             (
                 root / f"{name}.sqlite"
-                for name in MODELS
+                for name in active_models()
                 if (root / f"{name}.sqlite").exists()
             ),
             None,
@@ -214,8 +217,12 @@ def book_dir(state: Path, role: str) -> Path:
 def _validate_existing_books(root: Path) -> None:
     """Do not mix a legacy mandate, divergent inputs, or a partly used book."""
     present = [
-        root / f"{name}.sqlite" for name in MODELS if (root / f"{name}.sqlite").exists()
+        root / f"{name}.sqlite"
+        for name in active_models()
+        if (root / f"{name}.sqlite").exists()
     ]
+    if len(active_models()) == 1 and (root / "terra.sqlite").exists():
+        raise ValueError("single-Sol state contains an unexpected Terra ledger")
     original: ResearchPacket | None = None
     histories: list[tuple[Path, tuple[AuditEvent, ...]]] = []
     for path in present:
@@ -229,7 +236,7 @@ def _validate_existing_books(root: Path) -> None:
             raise ValueError("the two books have incompatible source evidence")
         original = packet
         histories.append((path, events))
-        if len(present) == 1 and len(events) != 1:
+        if len(active_models()) > 1 and len(present) == 1 and len(events) != 1:
             raise ValueError("a partially opened book has already recorded activity")
     if len(histories) == 2:
         _reconcile_ingest_suffix(histories[0], histories[1])
@@ -258,7 +265,7 @@ def _record_corporate_action_status(
         raise ValueError("corporate action receipt follows its ledger record")
     receipt_text = receipt.astimezone(UTC).isoformat() if receipt is not None else None
     key = f"prospective-ca:{status}:{stamp.isoformat()}"
-    for name in MODELS:
+    for name in active_models():
         path = root / f"{name}.sqlite"
         ledger = SQLiteLedger(path, create_schema=False)
         events = ledger.verified_events()
@@ -410,7 +417,7 @@ def pending_observation_reviews(state: Path) -> list[str]:
     """Find unresolved durable reviews before fetching another observation."""
     root = state / "observation"
     pending: list[str] = []
-    for name in MODELS:
+    for name in active_models():
         path = root / f"{name}.sqlite"
         receipt = root / name / "receipt.json"
         if not path.exists():
@@ -438,7 +445,7 @@ def stored_price_feed(state: Path, role: str) -> Literal["sip", "iex"] | None:
     """Read the one feed already present in the books before any new download."""
     labels: set[str] = set()
     root = state / role
-    for name in MODELS:
+    for name in active_models():
         path = root / f"{name}.sqlite"
         if not path.exists():
             continue
@@ -473,7 +480,7 @@ def pending_trade_requests(
     from drift.manager.service import _pending_executions
 
     requests: list[tuple[str, datetime]] = []
-    for name in MODELS:
+    for name in active_models():
         path = state / role / f"{name}.sqlite"
         if not path.exists():
             continue
@@ -498,7 +505,7 @@ def used_trade_ids(state: Path, role: str) -> frozenset[str]:
     from drift.manager.service import _pending_executions
 
     used: set[str] = set()
-    for name in MODELS:
+    for name in active_models():
         path = state / role / f"{name}.sqlite"
         if path.exists():
             events = SQLiteLedger(path, create_schema=False).verified_events()
@@ -509,9 +516,9 @@ def used_trade_ids(state: Path, role: str) -> frozenset[str]:
 
 @serialized
 def pending_benchmark_after(state: Path) -> datetime | None:
-    """Start a shared SPY baseline after both first sealed decisions, while in cash."""
+    """Start a SPY baseline after active books seal their first decisions in cash."""
     seals: list[datetime] = []
-    for name in MODELS:
+    for name in active_models():
         path = state / "observation" / f"{name}.sqlite"
         if not path.exists():
             return None
@@ -634,7 +641,7 @@ def resolve_expired_review(
     state: Path, name: str, proposal_id: str, reason: str
 ) -> dict[str, str]:
     """Record an explicit missed review without inventing a model decision."""
-    if name not in MODELS or not reason.strip():
+    if name not in active_models() or not reason.strip():
         raise ValueError("resolution requires a known model and a nonempty reason")
     path = state / "observation" / f"{name}.sqlite"
     if not path.exists():
@@ -722,13 +729,14 @@ def restore_pending_observation_reviews(state: Path) -> list[str]:
         if len(reviews) != 1:
             raise ValueError(f"{name} has ambiguous pending reviews")
         _restore_review_files(root / name, name, reviews[0])
-    _complete_interrupted_review_pair(state, pending)
+    if len(active_models()) > 1:
+        _complete_interrupted_review_pair(state, pending)
     return pending_observation_reviews(state)
 
 
 def _verify_paired_review_aliases(root: Path) -> None:
     """Validate both books before either can commit a successor review."""
-    for name in MODELS:
+    for name in active_models():
         path = root / f"{name}.sqlite"
         if not path.exists():
             continue
@@ -999,11 +1007,11 @@ def _archive_review(
 
 @serialized
 def open_books(state: Path, role: str, packet: ResearchPacket) -> dict[str, str]:
-    """Create terra and sol ledgers, or reopen the same packet and mandate."""
+    """Create configured ledgers, or reopen the same packet and mandate."""
     root = book_dir(state, role)
     opened: dict[str, str] = {}
     rules = readiness_mandate() if role == "readiness" else pilot_mandate()
-    for name in MODELS:
+    for name in active_models():
         path = root / f"{name}.sqlite"
         _manager, status = PortfolioManager.open(path, packet, rules)
         payload = status if isinstance(status, dict) else {"status": "unknown"}
@@ -1026,7 +1034,7 @@ def ingest_new(state: Path, role: str, collection: Collection) -> dict[str, obje
     }
     if len(incoming) > 1:
         raise ValueError("collection contains more than one price feed")
-    for name in MODELS:
+    for name in active_models():
         path = root / f"{name}.sqlite"
         if not path.exists():
             continue
@@ -1039,7 +1047,7 @@ def ingest_new(state: Path, role: str, collection: Collection) -> dict[str, obje
         }
         if len(stored) > 1 or (incoming and stored and incoming != stored):
             raise ValueError(f"{name} price feed differs from the collection")
-    for name in MODELS:
+    for name in active_models():
         path = root / f"{name}.sqlite"
         if not path.exists():
             results[name] = "missing"
@@ -1128,7 +1136,7 @@ def export_contexts(state: Path, role: str, as_of: datetime) -> dict[str, str]:
     if role == "observation":
         _verify_paired_review_aliases(root)
     written: dict[str, str] = {}
-    for name, identity in MODELS.items():
+    for name, identity in active_models().items():
         path = root / f"{name}.sqlite"
         manager = PortfolioManager.recover(path)
         context = manager.context(as_of)
@@ -1289,7 +1297,7 @@ def apply_proposal(
     proposal_path: Path,
 ) -> Json:
     """Record one model's proposal on that model's ledger only."""
-    if name not in MODELS:
+    if name not in active_models():
         message = f"unknown model {name}"
         raise ValueError(message)
     receipt_path = book_dir(state, role) / name / "receipt.json"
@@ -1399,7 +1407,7 @@ def apply_proposal(
         ),
         None,
     )
-    if not any(
+    if len(active_models()) > 1 and not any(
         event.deduplication_key == f"prospective-seal:{receipt_id}" for event in events
     ):
         _require_matching_review(state, name, review, events)
@@ -1514,7 +1522,7 @@ def apply_proposal(
 def mark_books(state: Path, role: str, as_of: datetime) -> dict[str, Json]:
     """Mark holdings when a finalized close exists. A refusal is reported."""
     results: dict[str, Json] = {}
-    for name in MODELS:
+    for name in active_models():
         path = book_dir(state, role) / f"{name}.sqlite"
         if not path.exists():
             results[name] = "missing"
@@ -1527,7 +1535,7 @@ def mark_books(state: Path, role: str, as_of: datetime) -> dict[str, Json]:
 @serialized
 def execute_books(state: Path, role: str, as_of: datetime) -> dict[str, Json]:
     results: dict[str, Json] = {}
-    for name in MODELS:
+    for name in active_models():
         path = book_dir(state, role) / f"{name}.sqlite"
         if not path.exists():
             results[name] = "missing"
@@ -1660,7 +1668,7 @@ def status_report(state: Path, role: str, as_of: datetime) -> dict[str, Json]:
     trusted: dict[str, Json] = {}
     sessions: dict[str, Json] = {}
     session_days: list[set[str]] = []
-    for name in MODELS:
+    for name in active_models():
         path = book_dir(state, role) / f"{name}.sqlite"
         if not path.exists():
             reports[name] = "missing"
@@ -1703,8 +1711,17 @@ def status_report(state: Path, role: str, as_of: datetime) -> dict[str, Json]:
         "counts_toward_observation": False,
         "completed_session_count": 0 if not completed_days else None,
         "model_identity_verification": "not_verified",
-        "paired_recorded_session_count": len(completed_days),
-        "paired_recorded_session_dates": list[Json](completed_days),
+        **(
+            {
+                "recorded_session_count": len(completed_days),
+                "recorded_session_dates": list[Json](completed_days),
+            }
+            if len(active_models()) == 1
+            else {
+                "paired_recorded_session_count": len(completed_days),
+                "paired_recorded_session_dates": list[Json](completed_days),
+            }
+        ),
         "decision_records": decisions,
         "trusted_decision_records": trusted,
         "observation_session_counts": sessions,

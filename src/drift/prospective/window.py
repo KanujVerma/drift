@@ -225,6 +225,7 @@ class ProspectiveWindow:
     source_sha256: str = ""
     source_received_at: datetime | None = None
     requested_start: date | None = None
+    mode: str = "paired"
 
     @property
     def observation_dates(self) -> tuple[date, ...]:
@@ -249,6 +250,8 @@ class ProspectiveWindow:
             "requested_start": self.requested_start.isoformat(),
             "dates": [day.isoformat() for day in self.dates],
         }
+        if self.mode == "single-sol":
+            body["mode"] = self.mode
         return hashlib.sha256(
             json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -337,6 +340,9 @@ def load_window(state: Path) -> ProspectiveWindow | None:
             or document.get("source_url") != NYSE_URL
         ):
             raise ValueError("invalid prospective window record")
+        mode = document.get("mode", "paired")
+        if mode not in {"paired", "single-sol"}:
+            raise ValueError("invalid prospective pilot mode")
         digest = document.get("source_sha256")
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("invalid NYSE source hash")
@@ -357,7 +363,7 @@ def load_window(state: Path) -> ProspectiveWindow | None:
     except (KeyError, TypeError, OSError, json.JSONDecodeError) as error:
         raise ValueError("prospective window record cannot be recovered") from error
     return ProspectiveWindow(
-        derived.calendar, derived.dates, digest, received, requested
+        derived.calendar, derived.dates, digest, received, requested, mode
     )
 
 
@@ -412,6 +418,7 @@ def configure_window(
         document = {
             "schema_version": "1",
             "pilot_version": PILOT_VERSION,
+            "mode": "single-sol",
             "source_url": NYSE_URL,
             "source_received_at": received.astimezone(UTC).isoformat(),
             "source_sha256": digest,

@@ -239,7 +239,7 @@ def test_book_rejects_a_different_configured_window_on_restart(
     with pilot_lock(first):
         packet = build_packet(replace(collection(as_of), bars=(bar,)), readiness=False)
         open_books(first, "observation", packet)
-    manager = PortfolioManager.recover(first / "observation" / "terra.sqlite")
+    manager = PortfolioManager.recover(first / "observation" / "sol.sqlite")
     assert isinstance(manager.context(as_of), dict)
     saved = first / "window-saved.json"
     (first / "window.json").rename(saved)

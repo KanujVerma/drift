@@ -1799,8 +1799,13 @@ def _pilot_invalidations_agree(ledger: SQLiteLedger, as_of: datetime) -> bool:
     """Both books must see identical invalidation notices at the cutoff."""
     if ledger.path.name not in {"terra.sqlite", "sol.sqlite"}:
         return False
+    from drift.prospective.config import active_models
+
+    names = tuple(f"{name}.sqlite" for name in active_models())
+    if ledger.path.name not in names:
+        return False
     notices: list[tuple[EvidenceItem, ...]] = []
-    for name in ("terra.sqlite", "sol.sqlite"):
+    for name in names:
         path = ledger.path.parent / name
         if not path.is_file():
             return False
@@ -1820,7 +1825,7 @@ def _pilot_invalidations_agree(ledger: SQLiteLedger, as_of: datetime) -> bool:
                 )
             )
         )
-    return notices[0] == notices[1]
+    return all(notice == notices[0] for notice in notices)
 
 
 def _pilot_coverage_available(
@@ -1833,8 +1838,13 @@ def _pilot_coverage_available(
     """Both books must agree on the latest recorded corporate-action coverage."""
     if ledger.path.name not in {"terra.sqlite", "sol.sqlite"}:
         return False
+    from drift.prospective.config import active_models
+
+    names = tuple(f"{name}.sqlite" for name in active_models())
+    if ledger.path.name not in names:
+        return False
     states: list[tuple[datetime, str, datetime]] = []
-    for name in ("terra.sqlite", "sol.sqlite"):
+    for name in names:
         path = ledger.path.parent / name
         if not path.is_file():
             return False
@@ -1868,7 +1878,7 @@ def _pilot_coverage_available(
         assert isinstance(status, str)
         states.append((latest.timestamp, status, coverage_at))
     return (
-        states[0] == states[1]
+        all(state == states[0] for state in states)
         and states[0][1] == "complete"
         and (required_at is None or states[0][2] >= required_at)
     )
@@ -2401,11 +2411,18 @@ def _paired_close_benchmark(
     }
     if nav is None or ledger.path.name not in {"terra.sqlite", "sol.sqlite"}:
         return unavailable
+    from drift.prospective.config import active_models
+
+    names = tuple(f"{name}.sqlite" for name in active_models())
+    if ledger.path.name not in names:
+        return unavailable
+    if len(names) == 1:
+        unavailable["reason"] = "a post-decision close and book valuation are required"
     histories: list[tuple[AuditEvent, ...]] = []
     packets: list[ResearchPacket] = []
     sources: list[SQLiteLedger] = []
     first_seals: list[datetime] = []
-    for name in ("terra.sqlite", "sol.sqlite"):
+    for name in names:
         path = ledger.path.parent / name
         if not path.is_file():
             return unavailable
@@ -2470,7 +2487,11 @@ def _paired_close_benchmark(
             }
         )
     shared = sorted(
-        (item for key, item in closes[0].items() if closes[1].get(key) == item),
+        (
+            item
+            for key, item in closes[0].items()
+            if all(close.get(key) == item for close in closes[1:])
+        ),
         key=lambda item: item.observed_at,
     )
     ends = [
@@ -2481,7 +2502,7 @@ def _paired_close_benchmark(
     if not ends:
         return unavailable
     end = ends[-1]
-    own = 0 if ledger.path.name == "terra.sqlite" else 1
+    own = names.index(ledger.path.name)
     for start in shared:
         day = start.observed_at.astimezone(NY).date()
         if day > session_date:
@@ -2512,7 +2533,7 @@ def _paired_close_benchmark(
                 if valuation not in ("marked", "cash_only") or value is None:
                     break
                 values.append(value)
-            if len(values) != 2:
+            if len(values) != len(names):
                 continue
             if any(
                 day < split <= session_date
@@ -2542,7 +2563,11 @@ def _paired_close_benchmark(
                 "start_as_of": when.isoformat(),
                 "start_portfolio_value": values[own],
                 "limitation": (
-                    "Comparison begins at the first shared close after both "
+                    "Comparison begins at the first eligible post-decision close "
+                    "with the book valued; earlier performance and dividends "
+                    "are excluded."
+                    if len(names) == 1
+                    else "Comparison begins at the first shared close after both "
                     "decisions with both books valued; earlier performance and "
                     "dividends are excluded."
                 ),
