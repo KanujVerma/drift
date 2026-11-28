@@ -61,7 +61,8 @@ economics are related but distinct measures.
   series are labeled; an unlabeled or price-only series is not called S&P 500
   total return. State is stored in the retained SQLite ledger. Later inputs
   are appended with `ingest` and stay invisible until their availability time.
-  [V02](V02.md) is the prospective two-book workflow on that cycle.
+  [V02](V02.md) is the prospective single-Sol workflow on that cycle;
+  historical paired windows retain their existing behavior.
   [HISTORICAL](HISTORICAL.md) replays the same cycle on past prices in a
   separate directory and does not write the prospective ledgers.
   [RESEARCH](RESEARCH.md) is a separate isolated book: a configured research

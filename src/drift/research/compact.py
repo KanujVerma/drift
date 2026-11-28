@@ -219,7 +219,7 @@ def _facts(
 
 def _fact_group(evidence_id: str) -> str:
     """Group a companyfacts id without its filed date, so a restatement collides."""
-    parts = evidence_id.split(":")
+    parts = evidence_id.split(":accn=", 1)[0].split(":")
     if len(parts) >= 9 and parts[0] == "sec" and parts[1] == "fact":
         return ":".join((*parts[:5], parts[5], *parts[7:]))
     return evidence_id
@@ -312,7 +312,7 @@ def _filing_identity(item: Mapping[str, object]) -> tuple[str, str, str] | None:
 
 
 def _fact_identity(evidence_id: str) -> tuple[str, ...] | None:
-    parts = evidence_id.split(":")
+    parts = evidence_id.split(":accn=", 1)[0].split(":")
     if len(parts) < 9 or parts[0] != "sec" or parts[1] != "fact":
         return None
     return (parts[2], parts[3], parts[4], parts[5], ":".join(parts[8:]))

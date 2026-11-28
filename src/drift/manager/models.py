@@ -26,6 +26,13 @@ REQUIRED_MANDATE_ACKNOWLEDGEMENTS = (
     "simulation-only; not a broker order or a market fill",
     "thresholds are test or local configuration, not an approved product mandate",
 )
+PROSPECTIVE_SEAL_REQUIRED = (
+    "prospective pilot decisions require a durable execution seal"
+)
+PROSPECTIVE_READINESS = "prospective readiness drill; not an observation"
+CENT_BASIS_ALLOCATION = (
+    "partial-sale basis allocated to cents half-even; residual stays in the holding"
+)
 REQUIRED_CONTEXT_LIMITATIONS = (
     "opening book accepts declared cash only; existing positions are not imported",
 )

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+from drift.domain.evaluator_portfolio import decimal_context
 from drift.historical.select import Window
 from drift.historical.sources import PriceBar, TextInput
 from drift.manager.book import packet_through
@@ -103,6 +104,7 @@ def historical_session(day: date) -> SimulationSession:
     )
 
 
+@decimal_context()
 def constrained_passive(
     open_price: str,
     close_price: str,
@@ -121,7 +123,7 @@ def constrained_passive(
     room = min(Decimal(fraction) * cash_amount, cash_amount - Decimal(floor))
     budget = room - Decimal(fee)
     opened = Decimal(open_price)
-    shares = int(budget / opened)
+    shares = max(0, int(budget / opened))
     while shares > 0 and (Decimal(shares) * opened + Decimal(fee)) > room:
         shares -= 1
     spent = Decimal(shares) * opened + (Decimal(fee) if shares else Decimal(0))
@@ -856,6 +858,7 @@ def _write_prompt(
     )
 
 
+@decimal_context()
 def research_brief(
     context: Json,
     as_of: datetime,
@@ -1445,6 +1448,7 @@ def _benchmark_times(manager: PortfolioManager) -> set[datetime]:
     return {point.available_at for point in packet.benchmark}
 
 
+@decimal_context()
 def price_value(
     study: Study, window: Window, context: Json, day: date
 ) -> dict[str, Json]:

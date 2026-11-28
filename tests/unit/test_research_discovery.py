@@ -766,3 +766,48 @@ def _fact(filed: str, value: str) -> dict[str, object]:
         ),
         "symbol": "CAT",
     }
+
+
+def test_screen_financial_calculations_ignore_caller_decimal_context() -> None:
+    from decimal import Context, localcontext
+
+    closes = [
+        ClosePoint(
+            "AAPL",
+            date(2026, 1, 1) + timedelta(days=n),
+            Decimal(100 + n),
+            Decimal("1000000"),
+            str(n),
+        )
+        for n in range(64)
+    ]
+    expected = screen(
+        closes,
+        as_of=closes[-1].day,
+        universe=frozenset({"AAPL"}),
+        authorized=frozenset({"AAPL"}),
+    )
+    with localcontext(Context(prec=1)):
+        assert (
+            screen(
+                closes,
+                as_of=closes[-1].day,
+                universe=frozenset({"AAPL"}),
+                authorized=frozenset({"AAPL"}),
+            )
+            == expected
+        )
+
+
+def test_research_brief_ignores_caller_decimal_context() -> None:
+    from decimal import Context, localcontext
+
+    days = _days(70)
+    rows = [_close_row("CAT", day, 100 + index) for index, day in enumerate(days)]
+    context = cast(Json, {"evidence": rows})
+    when = datetime.combine(days[-1], datetime.min.time(), tzinfo=UTC) + timedelta(
+        hours=23
+    )
+    expected = research_brief(context, when)
+    with localcontext(Context(prec=1)):
+        assert research_brief(context, when) == expected

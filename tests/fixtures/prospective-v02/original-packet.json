@@ -1,0 +1,207 @@
+{
+  "schema_version": "1",
+  "instruments": [
+    {
+      "symbol": "AAPL",
+      "security_id": "de66c77b-395f-7f7a-b96b-1cf9e11a220c",
+      "name": "Apple Inc."
+    },
+    {
+      "symbol": "MSFT",
+      "security_id": "b588e1bb-7c5a-7076-853e-2ebbaaaa712c",
+      "name": "Microsoft Corporation"
+    },
+    {
+      "symbol": "JNJ",
+      "security_id": "487f8d26-009c-7a3a-962c-bb5e75d6f46c",
+      "name": "Johnson & Johnson"
+    },
+    {
+      "symbol": "SPY",
+      "security_id": "d0facec6-c529-716c-8ff8-d90aa52bc52d",
+      "name": "SPDR S&P 500 ETF Trust"
+    }
+  ],
+  "sessions": [
+    {
+      "local_date": "2026-11-27",
+      "opened_at": "2026-11-27T14:30:00Z",
+      "closed_at": "2026-11-27T23:59:00Z"
+    },
+    {
+      "local_date": "2026-11-30",
+      "opened_at": "2026-11-30T14:30:00Z",
+      "closed_at": "2026-11-30T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-01",
+      "opened_at": "2026-12-01T14:30:00Z",
+      "closed_at": "2026-12-01T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-02",
+      "opened_at": "2026-12-02T14:30:00Z",
+      "closed_at": "2026-12-02T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-03",
+      "opened_at": "2026-12-03T14:30:00Z",
+      "closed_at": "2026-12-03T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-04",
+      "opened_at": "2026-12-04T14:30:00Z",
+      "closed_at": "2026-12-04T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-07",
+      "opened_at": "2026-12-07T14:30:00Z",
+      "closed_at": "2026-12-07T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-08",
+      "opened_at": "2026-12-08T14:30:00Z",
+      "closed_at": "2026-12-08T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-09",
+      "opened_at": "2026-12-09T14:30:00Z",
+      "closed_at": "2026-12-09T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-10",
+      "opened_at": "2026-12-10T14:30:00Z",
+      "closed_at": "2026-12-10T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-11",
+      "opened_at": "2026-12-11T14:30:00Z",
+      "closed_at": "2026-12-11T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-14",
+      "opened_at": "2026-12-14T14:30:00Z",
+      "closed_at": "2026-12-14T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-15",
+      "opened_at": "2026-12-15T14:30:00Z",
+      "closed_at": "2026-12-15T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-16",
+      "opened_at": "2026-12-16T14:30:00Z",
+      "closed_at": "2026-12-16T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-17",
+      "opened_at": "2026-12-17T14:30:00Z",
+      "closed_at": "2026-12-17T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-18",
+      "opened_at": "2026-12-18T14:30:00Z",
+      "closed_at": "2026-12-18T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-21",
+      "opened_at": "2026-12-21T14:30:00Z",
+      "closed_at": "2026-12-21T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-22",
+      "opened_at": "2026-12-22T14:30:00Z",
+      "closed_at": "2026-12-22T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-23",
+      "opened_at": "2026-12-23T14:30:00Z",
+      "closed_at": "2026-12-23T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-24",
+      "opened_at": "2026-12-24T14:30:00Z",
+      "closed_at": "2026-12-24T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-28",
+      "opened_at": "2026-12-28T14:30:00Z",
+      "closed_at": "2026-12-28T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-29",
+      "opened_at": "2026-12-29T14:30:00Z",
+      "closed_at": "2026-12-29T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-30",
+      "opened_at": "2026-12-30T14:30:00Z",
+      "closed_at": "2026-12-30T23:59:00Z"
+    },
+    {
+      "local_date": "2026-12-31",
+      "opened_at": "2026-12-31T14:30:00Z",
+      "closed_at": "2026-12-31T23:59:00Z"
+    },
+    {
+      "local_date": "2027-01-04",
+      "opened_at": "2027-01-04T14:30:00Z",
+      "closed_at": "2027-01-04T23:59:00Z"
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "yahoo:AAPL:close:2026-11-25",
+      "kind": "observation",
+      "symbol": "AAPL",
+      "observed_at": "2026-11-25T21:00:00Z",
+      "available_at": "2026-11-27T18:10:00Z",
+      "limitations": [
+        "Yahoo chart v8 rounded half-up to cents; not an official exchange print; collected 2026-11-27T18:10:00+00:00",
+        "admitted only after the session close; the first post-close value is kept"
+      ],
+      "summary": "Daily close 101 for AAPL.",
+      "source_label": "yahoo-chart-v8",
+      "price": "101",
+      "price_role": "close"
+    },
+    {
+      "evidence_id": "yahoo:AAPL:open:2026-11-25",
+      "kind": "observation",
+      "symbol": "AAPL",
+      "observed_at": "2026-11-25T14:30:00Z",
+      "available_at": "2026-11-27T18:10:00Z",
+      "limitations": [
+        "Yahoo chart v8 rounded half-up to cents; not an official exchange print; collected 2026-11-27T18:10:00+00:00",
+        "open is the execution observation only when it is after the decision"
+      ],
+      "summary": "Daily open 100 for AAPL.",
+      "source_label": "yahoo-chart-v8",
+      "price": "100",
+      "price_role": "trade"
+    }
+  ],
+  "portfolio_context": {
+    "as_of": "2026-11-27T14:30:00Z",
+    "cash": "10000",
+    "positions": [],
+    "limitations": [
+      "opening book accepts declared cash only; existing positions are not imported"
+    ]
+  },
+  "limitations": [
+    "declared sessions are a simulation calendar, not exchange session authority",
+    "local supplied inputs are untrusted and are not source authentication",
+    "source gaps are recorded beside the collection and are not invented",
+    "Yahoo prices are not official exchange prints",
+    "filing acceptance times are source timestamps, not exchange authority"
+  ],
+  "benchmark": [],
+  "settlement_only_dates": [
+    "2026-12-28",
+    "2026-12-29",
+    "2026-12-30",
+    "2026-12-31",
+    "2027-01-04"
+  ]
+}

@@ -155,6 +155,11 @@ class SQLiteLedger:
         with self._connection() as connection:
             connection.executescript(_SCHEMA)
 
+    @property
+    def path(self) -> Path:
+        """The ledger path, without opening or modifying the file."""
+        return self._path
+
     @classmethod
     def open_existing(cls, path: Path) -> Self:
         """Open an existing ledger without creating or repairing schema objects."""

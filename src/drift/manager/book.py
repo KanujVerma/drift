@@ -35,6 +35,7 @@ from drift.errors import LedgerIntegrityError
 from drift.evaluator.portfolio import PortfolioAccountingKernel, initial_portfolio_state
 from drift.ledger.interface import AuditEventDraft, Ledger
 from drift.manager.models import (
+    CENT_BASIS_ALLOCATION,
     BenchmarkPoint,
     EvidenceItem,
     ResearchPacket,
@@ -55,6 +56,11 @@ REFLECTION = "manager.reflection"
 FEEDBACK = "manager.feedback"
 INGEST = "manager.ingest"
 FILL = "manager.fill"
+PROSPECTIVE_REVIEW = "manager.prospective_review"
+PROSPECTIVE_INTENT = "manager.prospective_intent"
+PROSPECTIVE_SEAL = "manager.prospective_seal"
+PROSPECTIVE_EXPIRED = "manager.prospective_expired"
+PROSPECTIVE_CA_STATUS = "manager.prospective_corporate_action_status"
 
 CLOCK_LIMITATIONS = tuple(
     sorted(
@@ -262,7 +268,11 @@ def build_kernel(packet: ResearchPacket, packet_hash: str) -> PortfolioAccountin
         initial_cash=parse_money(packet.portfolio_context.cash),
         admission=_admission(packet_hash),
     )
-    return PortfolioAccountingKernel(state, session_clock=_clock(packet))
+    return PortfolioAccountingKernel(
+        state,
+        session_clock=_clock(packet),
+        cent_basis_allocation=CENT_BASIS_ALLOCATION in packet.limitations,
+    )
 
 
 def _apply_advances(kernel: PortfolioAccountingKernel, advances: Json) -> None:
@@ -490,7 +500,15 @@ def replay(
         if event.event_type in (DECISION, MARK, FILL):
             apply_recorded_effect(kernel, packet, payload)
             continue
-        if event.event_type in (REFLECTION, FEEDBACK):
+        if event.event_type in (
+            REFLECTION,
+            FEEDBACK,
+            PROSPECTIVE_REVIEW,
+            PROSPECTIVE_INTENT,
+            PROSPECTIVE_SEAL,
+            PROSPECTIVE_EXPIRED,
+            PROSPECTIVE_CA_STATUS,
+        ):
             continue
         message = f"unknown manager event {event.event_type}"
         raise LedgerIntegrityError(message)

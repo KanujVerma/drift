@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
+from drift.domain.evaluator_portfolio import decimal_context
+
 WARMUP_SESSIONS = 63
 LIQUIDITY_SESSIONS = 21
 SHORTLIST_LIMIT = 4
@@ -67,6 +69,7 @@ class ScreenRow:
     notes: tuple[str, ...]
 
 
+@decimal_context()
 def screen(
     closes: tuple[ClosePoint, ...] | list[ClosePoint],
     *,
