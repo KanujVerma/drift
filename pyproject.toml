@@ -8,6 +8,8 @@ version = "0.2.0"
 description = "Simulation-only AI portfolio manager"
 requires-python = ">=3.14"
 dependencies = [
+    "httpx>=0.27,<1",
+    "openai>=2,<3",
     "pydantic>=2.0,<3.0",
 ]
 
