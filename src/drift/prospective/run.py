@@ -25,6 +25,8 @@ from drift.manager.book import (
     PROSPECTIVE_CA_STATUS,
     PROSPECTIVE_EXPIRED,
     PROSPECTIVE_INTENT,
+    PROSPECTIVE_REQUEST_ATTEMPT,
+    PROSPECTIVE_REQUEST_COMPLETION,
     PROSPECTIVE_REVIEW,
     PROSPECTIVE_SEAL,
     append_manager_event,
@@ -1366,8 +1368,12 @@ def apply_proposal(
     role: str,
     name: str,
     proposal_path: Path,
+    *,
+    runtime_evidence: dict[str, Json] | None = None,
 ) -> Json:
     """Record one model's proposal on that model's ledger only."""
+    if runtime_evidence is not None and role != "observation":
+        raise ValueError("direct runtime evidence requires an observation review")
     _refuse_legacy_writes(state / role)
     if name not in active_models():
         message = f"unknown model {name}"
@@ -1433,6 +1439,101 @@ def apply_proposal(
     if len(reviews) != 1:
         raise ValueError("review is not bound to this book")
     review = reviews[0]
+    attempt_key = f"prospective-request-attempt:{receipt_id}"
+    attempts = [
+        event
+        for event in events
+        if event.deduplication_key == attempt_key
+        or (
+            event.event_type == PROSPECTIVE_REQUEST_ATTEMPT
+            and (
+                thaw(event.payload).get("proposal_id") == receipt_id
+                or thaw(event.payload).get("review_hash") == review.event_hash
+            )
+        )
+    ]
+    if runtime_evidence is None and attempts:
+        raise ValueError(
+            "direct request attempted; resolve the review under supervision"
+        )
+    if runtime_evidence is not None:
+        fixed = {
+            "route": "chatgpt-plan-responses",
+            "requested_model": "gpt-6.2-sol",
+            "observed_model": "gpt-6.2-sol",
+            "requested_effort": "xhigh",
+            "observed_effort": "xhigh",
+            "review_hash": review.event_hash,
+        }
+        if (
+            name != "sol"
+            or any(runtime_evidence.get(key) != value for key, value in fixed.items())
+            or set(runtime_evidence)
+            != set(fixed) | {"response_id", "account_subject_sha256", "client_id"}
+            or not isinstance(runtime_evidence.get("response_id"), str)
+            or not runtime_evidence["response_id"]
+            or len(str(runtime_evidence["response_id"])) > 200
+            or not isinstance(runtime_evidence.get("client_id"), str)
+            or not str(runtime_evidence["client_id"]).startswith("oaiapp_")
+            or not isinstance(runtime_evidence.get("account_subject_sha256"), str)
+            or len(str(runtime_evidence["account_subject_sha256"])) != 64
+            or any(
+                c not in "0123456789abcdef"
+                for c in str(runtime_evidence["account_subject_sha256"])
+            )
+        ):
+            raise ValueError("direct runtime evidence is invalid")
+        if len(attempts) != 1:
+            raise ValueError("direct runtime evidence requires one request attempt")
+        attempt = attempts[0]
+        attempt_payload = thaw(attempt.payload)
+        if (
+            attempt.event_type != PROSPECTIVE_REQUEST_ATTEMPT
+            or attempt.deduplication_key != attempt_key
+            or events.index(attempt) <= events.index(review)
+            or attempt_payload
+            != {
+                "proposal_id": receipt_id,
+                "review_hash": review.event_hash,
+                "route": runtime_evidence["route"],
+                "account_subject_sha256": runtime_evidence["account_subject_sha256"],
+                "client_id": runtime_evidence["client_id"],
+            }
+        ):
+            raise ValueError("direct runtime evidence does not match request attempt")
+        completion_key = f"prospective-request-completion:{receipt_id}"
+        completions = [
+            event
+            for event in events
+            if event.deduplication_key == completion_key
+            or (
+                event.event_type == PROSPECTIVE_REQUEST_COMPLETION
+                and (
+                    thaw(event.payload).get("proposal_id") == receipt_id
+                    or thaw(event.payload).get("review_hash") == review.event_hash
+                    or thaw(event.payload).get("attempt_hash") == attempt.event_hash
+                )
+            )
+        ]
+        if len(completions) != 1:
+            raise ValueError("direct runtime evidence requires one request completion")
+        completion = completions[0]
+        if (
+            completion.event_type != PROSPECTIVE_REQUEST_COMPLETION
+            or completion.deduplication_key != completion_key
+            or events.index(completion) <= events.index(attempt)
+            or thaw(completion.payload)
+            != {
+                "proposal_id": receipt_id,
+                "review_hash": review.event_hash,
+                "attempt_hash": attempt.event_hash,
+                "proposal": json.loads(proposal.model_dump_json()),
+                "runtime_evidence": runtime_evidence,
+            }
+        ):
+            raise ValueError(
+                "direct runtime evidence does not match request completion"
+            )
     if observation_date(review.timestamp) is None:
         raise ValueError("review time is outside an observation session")
     saved = thaw(review.payload)
@@ -1504,6 +1605,7 @@ def apply_proposal(
             payload={
                 "proposal": json.loads(proposal.model_dump_json()),
                 "review_hash": review.event_hash,
+                **({"runtime_evidence": runtime_evidence} if runtime_evidence else {}),
             },
             expected_previous_hash=events[-1].event_hash,
         )
@@ -1513,7 +1615,15 @@ def apply_proposal(
             intent.event_type != PROSPECTIVE_INTENT
             or intent_payload.get("review_hash") != review.event_hash
             or intent_payload.get("proposal") != json.loads(proposal.model_dump_json())
+            or (
+                runtime_evidence is not None
+                and intent_payload.get("runtime_evidence") != runtime_evidence
+            )
             or events.index(intent) <= events.index(review)
+            or (
+                runtime_evidence is not None
+                and events.index(intent) <= events.index(completion)
+            )
         ):
             raise ValueError("proposal conflicts with saved submission intent")
     if decision is not None:

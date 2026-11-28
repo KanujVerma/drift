@@ -61,6 +61,8 @@ PROSPECTIVE_INTENT = "manager.prospective_intent"
 PROSPECTIVE_SEAL = "manager.prospective_seal"
 PROSPECTIVE_EXPIRED = "manager.prospective_expired"
 PROSPECTIVE_CA_STATUS = "manager.prospective_corporate_action_status"
+PROSPECTIVE_REQUEST_ATTEMPT = "manager.prospective_request_attempt"
+PROSPECTIVE_REQUEST_COMPLETION = "manager.prospective_request_completion"
 
 CLOCK_LIMITATIONS = tuple(
     sorted(
@@ -508,6 +510,8 @@ def replay(
             PROSPECTIVE_SEAL,
             PROSPECTIVE_EXPIRED,
             PROSPECTIVE_CA_STATUS,
+            PROSPECTIVE_REQUEST_ATTEMPT,
+            PROSPECTIVE_REQUEST_COMPLETION,
         ):
             continue
         message = f"unknown manager event {event.event_type}"
