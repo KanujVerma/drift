@@ -6,9 +6,9 @@ from drift.historical.evaluation_excerpts import substantive_excerpt
 def test_self_closing_void_tag_does_not_expose_hidden_financial_text():
     body = (
         '<div style="display:none"><br/>'
-        'Revenue increased 42 percent compared with the prior year because '
-        'strong demand and higher sales drove growth across all of our products.'
-        '</div><p>Visible short text.</p>'
+        "Revenue increased 42 percent compared with the prior year because "
+        "strong demand and higher sales drove growth across all of our products."
+        "</div><p>Visible short text.</p>"
     )
     assert substantive_excerpt(body) == ""
 
