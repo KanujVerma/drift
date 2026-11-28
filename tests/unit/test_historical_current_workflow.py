@@ -4,16 +4,25 @@ import json
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import pytest
 from test_historical_replay import FIRST, SECOND, _study
 
 from drift.historical.replay import prepare_review
 from drift.historical.sources import PriceBar, TextInput
+from drift.manager.service import PortfolioManager
 from drift.prospective.config import TRADING_SYMBOLS
 
 
-def test_current_review_exposes_thirteen_symbols_without_future_prices(tmp_path):
+def _recover(path: Path) -> Any:
+    return PortfolioManager.recover(path)
+
+
+def test_current_review_exposes_thirteen_symbols_without_future_prices(
+    tmp_path: Path,
+) -> None:
     study, window = _study()
     existing = {bar.symbol for bar in study.bars}
     days = {bar.day for bar in study.bars}
@@ -61,11 +70,12 @@ def test_current_review_exposes_thirteen_symbols_without_future_prices(tmp_path)
     )
 
 
-def test_expanded_purchase_fills_at_next_open_and_remembers_own_outcome(tmp_path):
+def test_expanded_purchase_fills_at_next_open_and_remembers_own_outcome(
+    tmp_path: Path,
+) -> None:
     from test_historical_replay import _buy
 
     from drift.historical.replay import acknowledge, decision_time
-    from drift.manager.service import PortfolioManager
 
     study, window = _study()
     existing = {bar.symbol for bar in study.bars}
@@ -95,7 +105,7 @@ def test_expanded_purchase_fills_at_next_open_and_remembers_own_outcome(tmp_path
         and row.get("price_role") == "close"
         and FIRST.isoformat() in row["evidence_id"]
     )
-    manager = PortfolioManager.recover(root / "book.sqlite")
+    manager = _recover(root / "book.sqlite")
     invalid = _buy(receipt, "invented-future-citation").model_copy(
         update={"symbol": "AMZN"}
     )
@@ -105,7 +115,7 @@ def test_expanded_purchase_fills_at_next_open_and_remembers_own_outcome(tmp_path
     prepare_review(other, study, window, book="memory", model="sol")
     root = other / "bullish" / "memory" / "sol"
     receipt = json.loads((root / "receipt.json").read_text())
-    manager = PortfolioManager.recover(root / "book.sqlite")
+    manager = _recover(root / "book.sqlite")
     assert (
         manager.propose(_buy(receipt, citation).model_copy(update={"symbol": "AMZN"}))[
             "status"
@@ -126,12 +136,11 @@ def test_expanded_purchase_fills_at_next_open_and_remembers_own_outcome(tmp_path
     ("symbol", "expected"), [("AAPL", "accepted"), ("AMZN", "rejected")]
 )
 def test_native_trade_cites_only_eligible_displayed_outcomes(
-    tmp_path, symbol, expected
-):
+    tmp_path: Path, symbol: str, expected: str
+) -> None:
     from test_historical_replay import _buy
 
     from drift.historical.replay import acknowledge, apply_native
-    from drift.manager.service import PortfolioManager
 
     study, window = _study()
     existing = {bar.symbol for bar in study.bars}
@@ -153,9 +162,7 @@ def test_native_trade_cites_only_eligible_displayed_outcomes(
         if row.get("symbol") == "AAPL" and row.get("price_role") == "close"
     )
     assert (
-        PortfolioManager.recover(root / "book.sqlite").propose(_buy(receipt, price))[
-            "status"
-        ]
+        _recover(root / "book.sqlite").propose(_buy(receipt, price))["status"]
         == "accepted"
     )
     acknowledge(tmp_path, study, window, book="memory", model="sol")
@@ -201,7 +208,9 @@ def test_native_trade_cites_only_eligible_displayed_outcomes(
         assert all(not reason.startswith("unsupported_evidence") for reason in reasons)
 
 
-def test_new_historical_books_use_cent_basis_while_old_books_reopen(tmp_path):
+def test_new_historical_books_use_cent_basis_while_old_books_reopen(
+    tmp_path: Path,
+) -> None:
     from drift.historical.replay import (
         CLOSE_TIME_LIMITATION,
         _manager,
@@ -210,7 +219,6 @@ def test_new_historical_books_use_cent_basis_while_old_books_reopen(tmp_path):
     )
     from drift.manager.book import replay
     from drift.manager.models import CENT_BASIS_ALLOCATION
-    from drift.manager.service import PortfolioManager
 
     study, window = _study()
     old_root = tmp_path / "old" / "bullish" / "memory" / "sol"
@@ -260,7 +268,7 @@ def test_new_historical_books_use_cent_basis_while_old_books_reopen(tmp_path):
     _manager(tmp_path / "new", study, window, "memory", "sol")
 
 
-def test_daily_close_source_discloses_assumed_timestamp():
+def test_daily_close_source_discloses_assumed_timestamp() -> None:
     from drift.historical.replay import _benchmark_point, _optional_price
 
     study, window = _study()
@@ -271,7 +279,9 @@ def test_daily_close_source_discloses_assumed_timestamp():
     assert any("actual exchange close" in note for note in benchmark.limitations)
 
 
-def test_workflow_binding_prevents_using_the_same_book_for_legacy_and_current(tmp_path):
+def test_workflow_binding_prevents_using_the_same_book_for_legacy_and_current(
+    tmp_path: Path,
+) -> None:
     import pytest
 
     study, window = _study()
@@ -286,12 +296,11 @@ def test_workflow_binding_prevents_using_the_same_book_for_legacy_and_current(tm
         )
 
 
-def test_workflow_mismatch_does_not_advance_an_existing_cursor(tmp_path):
+def test_workflow_mismatch_does_not_advance_an_existing_cursor(tmp_path: Path) -> None:
     import pytest
     from test_historical_replay import _buy
 
     from drift.historical.replay import acknowledge
-    from drift.manager.service import PortfolioManager
 
     study, window = _study()
     prepare_review(tmp_path, study, window, book="memory", model="sol")
@@ -306,9 +315,7 @@ def test_workflow_mismatch_does_not_advance_an_existing_cursor(tmp_path):
         and FIRST.isoformat() in row["evidence_id"]
     )
     assert (
-        PortfolioManager.recover(root / "book.sqlite").propose(_buy(receipt, citation))[
-            "status"
-        ]
+        _recover(root / "book.sqlite").propose(_buy(receipt, citation))["status"]
         == "accepted"
     )
     before = (root / "cursor.json").read_bytes()
@@ -323,7 +330,7 @@ def test_workflow_mismatch_does_not_advance_an_existing_cursor(tmp_path):
     assert (root / "cursor.json").read_bytes() == before
 
 
-def test_expanded_window_retains_preexisting_research_for_new_symbols():
+def test_expanded_window_retains_preexisting_research_for_new_symbols() -> None:
     from drift.historical.replay import texts_for_window
 
     _, window = _study()
@@ -340,7 +347,9 @@ def test_expanded_window_retains_preexisting_research_for_new_symbols():
     assert item not in texts_for_window((item,), window)
 
 
-def test_current_apply_rejects_citations_not_shown_before_mutating_book(tmp_path):
+def test_current_apply_rejects_citations_not_shown_before_mutating_book(
+    tmp_path: Path,
+) -> None:
     import pytest
     from test_historical_replay import _buy
 
@@ -375,7 +384,9 @@ def test_current_apply_rejects_citations_not_shown_before_mutating_book(tmp_path
     assert (root / "cursor.json").read_bytes() == cursor
 
 
-def test_current_apply_accepts_shown_citation_and_fills_next_open(tmp_path):
+def test_current_apply_accepts_shown_citation_and_fills_next_open(
+    tmp_path: Path,
+) -> None:
     from test_historical_replay import _buy
 
     from drift.historical.replay import apply_native
@@ -426,11 +437,12 @@ def test_current_apply_accepts_shown_citation_and_fills_next_open(tmp_path):
     assert any(row["symbol"] == "AMZN" for row in next_context["decisions"])
 
 
-def test_rejected_buy_cash_only_review_values_cash_on_review_day(tmp_path):
+def test_rejected_buy_cash_only_review_values_cash_on_review_day(
+    tmp_path: Path,
+) -> None:
     from test_historical_replay import _buy
 
     from drift.historical.replay import acknowledge
-    from drift.manager.service import PortfolioManager
 
     study, window = _study()
     existing = {bar.symbol for bar in study.bars}
@@ -445,7 +457,7 @@ def test_rejected_buy_cash_only_review_values_cash_on_review_day(tmp_path):
     prepare_review(tmp_path, study, window, book="memory", model="sol")
     root = tmp_path / "bullish" / "memory" / "sol"
     receipt = json.loads((root / "receipt.json").read_text())
-    manager = PortfolioManager.recover(root / "book.sqlite")
+    manager = _recover(root / "book.sqlite")
     assert manager.propose(_buy(receipt, "not-in-ledger"))["status"] == "rejected"
     acknowledge(tmp_path, study, window, book="memory", model="sol")
     context = json.loads((root / "context.json").read_text())
@@ -460,7 +472,7 @@ def test_rejected_buy_cash_only_review_values_cash_on_review_day(tmp_path):
     assert context["decisions"][0]["status"] == "rejected"
 
 
-def test_historical_cash_view_does_not_value_an_unmarked_position():
+def test_historical_cash_view_does_not_value_an_unmarked_position() -> None:
     from drift.historical.replay import historical_cash_view
 
     book = {
@@ -469,15 +481,15 @@ def test_historical_cash_view_does_not_value_an_unmarked_position():
         "holdings": [{"symbol": "AAPL", "quantity": 1}],
         "net_asset_value": None,
     }
-    context = {"book": book}
+    context: dict[str, Any] = {"book": book}
     assert historical_cash_view(context, SECOND) == context
     assert book["net_asset_value"] is None
 
 
-def test_historical_cash_view_is_nonmutating():
+def test_historical_cash_view_is_nonmutating() -> None:
     from drift.historical.replay import historical_cash_view
 
-    context = {
+    context: dict[str, Any] = {
         "book": {
             "valuation": "unavailable",
             "cash": "10000",
@@ -485,17 +497,16 @@ def test_historical_cash_view_is_nonmutating():
             "session": FIRST.isoformat(),
         }
     }
-    result = historical_cash_view(context, SECOND)
+    result: Any = historical_cash_view(context, SECOND)
     assert result["book"]["net_asset_value"] == "10000"
     assert "net_asset_value" not in context["book"]
     assert result["book"]["session"] == FIRST.isoformat()
 
 
-def test_accepted_all_cash_hold_keeps_cash_value_in_next_review(tmp_path):
+def test_accepted_all_cash_hold_keeps_cash_value_in_next_review(tmp_path: Path) -> None:
     from test_historical_replay import _buy
 
     from drift.historical.replay import acknowledge
-    from drift.manager.service import PortfolioManager
 
     study, window = _study()
     existing = {bar.symbol for bar in study.bars}
@@ -518,10 +529,7 @@ def test_accepted_all_cash_hold_keeps_cash_value_in_next_review(tmp_path):
             "exit_conditions": (),
         }
     )
-    assert (
-        PortfolioManager.recover(root / "book.sqlite").propose(hold)["status"]
-        == "accepted"
-    )
+    assert _recover(root / "book.sqlite").propose(hold)["status"] == "accepted"
     acknowledge(tmp_path, study, window, book="memory", model="sol")
     result = json.loads((root / "context.json").read_text())
     assert result["book"]["net_asset_value"] == "10000"
@@ -529,13 +537,12 @@ def test_accepted_all_cash_hold_keeps_cash_value_in_next_review(tmp_path):
 
 
 def test_opt_in_exit_memory_shows_prior_filled_trade_conditions_without_trading(
-    tmp_path,
-):
+    tmp_path: Path,
+) -> None:
     from test_historical_replay import _buy
 
     from drift.historical.replay import acknowledge, decision_time
     from drift.manager.models import ExitCondition
-    from drift.manager.service import PortfolioManager
 
     study, window = _study()
     existing = {bar.symbol for bar in study.bars}
@@ -563,7 +570,7 @@ def test_opt_in_exit_memory_shows_prior_filled_trade_conditions_without_trading(
         and x.get("price_role") == "close"
         and FIRST.isoformat() in x["evidence_id"]
     )
-    manager = PortfolioManager.recover(root / "book.sqlite")
+    manager = _recover(root / "book.sqlite")
     proposal = _buy(receipt, citation).model_copy(
         update={
             "exit_conditions": (ExitCondition(kind="price_below", threshold="110"),)
@@ -591,7 +598,9 @@ def test_opt_in_exit_memory_shows_prior_filled_trade_conditions_without_trading(
     assert "exit_conditions" not in default["decisions"][0]
 
 
-def test_exit_review_cannot_reuse_ordinary_current_workflow_book(tmp_path):
+def test_exit_review_cannot_reuse_ordinary_current_workflow_book(
+    tmp_path: Path,
+) -> None:
     import pytest
 
     study, window = _study()

@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from importlib import import_module, util
+from typing import TypedDict
 
 from drift.prospective.config import mandate
 
@@ -371,12 +372,18 @@ def test_first_observation_cannot_start_after_the_fixed_window_begins(
 def test_experimental_citation_guidance_is_opt_in() -> None:
     from drift.prospective.run import review_prompt
 
-    args = dict(
-        identity="codex/gpt-6.2-sol@xhigh",
-        proposal_id="id",
-        as_of="2024-01-31T22:00:00+00:00",
-        context_path="context.json",
-    )
+    class PromptArgs(TypedDict):
+        identity: str
+        proposal_id: str
+        as_of: str
+        context_path: str
+
+    args: PromptArgs = {
+        "identity": "codex/gpt-6.2-sol@xhigh",
+        "proposal_id": "id",
+        "as_of": "2024-01-31T22:00:00+00:00",
+        "context_path": "context.json",
+    }
     baseline = review_prompt(**args)
     assert baseline == review_prompt(**args, same_symbol_guidance=False)
     candidate = review_prompt(**args, same_symbol_guidance=True)

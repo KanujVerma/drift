@@ -3,7 +3,7 @@
 from drift.historical.evaluation_excerpts import substantive_excerpt
 
 
-def test_self_closing_void_tag_does_not_expose_hidden_financial_text():
+def test_self_closing_void_tag_does_not_expose_hidden_financial_text() -> None:
     body = (
         '<div style="display:none"><br/>'
         "Revenue increased 42 percent compared with the prior year because "

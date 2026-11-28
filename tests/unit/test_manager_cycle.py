@@ -1955,7 +1955,9 @@ def test_partial_sale_can_report_exact_marked_nav_when_unrealized_is_inexact(
 
     from decimal import Decimal
     from types import SimpleNamespace
+    from typing import cast
 
+    from drift.evaluator.portfolio import PortfolioAccountingKernel
     from drift.manager.book import replay
     from drift.manager.service import _independent_marked_value
 
@@ -1979,5 +1981,15 @@ def test_partial_sale_can_report_exact_marked_nav_when_unrealized_is_inexact(
             "holdings_market_value": state.holdings_market_value + Decimal("1"),
         }
     )
-    assert _independent_marked_value(SimpleNamespace(state=corrupt_nav)) is None
-    assert _independent_marked_value(SimpleNamespace(state=corrupt_market)) is None
+    assert (
+        _independent_marked_value(
+            cast(PortfolioAccountingKernel, SimpleNamespace(state=corrupt_nav))
+        )
+        is None
+    )
+    assert (
+        _independent_marked_value(
+            cast(PortfolioAccountingKernel, SimpleNamespace(state=corrupt_market))
+        )
+        is None
+    )
