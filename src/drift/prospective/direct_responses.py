@@ -25,6 +25,7 @@ from openai import OpenAI
 from drift.ledger.sqlite import SQLiteLedger
 from drift.manager.book import (
     PROSPECTIVE_REQUEST_ATTEMPT,
+    PROSPECTIVE_REQUEST_COMPLETION,
     PROSPECTIVE_REVIEW,
     append_manager_event,
     replay,
@@ -377,7 +378,7 @@ def setup_billing(*, expected_subject: str) -> None:
         os.fsync(handle.fileno())
 
 
-def _record_attempt(state: Path, review: SavedReview, session: PlanSession) -> None:
+def _record_attempt(state: Path, review: SavedReview, session: PlanSession) -> str:
     """Commit an attempt before transmission while holding the pilot lock."""
     ledger = SQLiteLedger(state / "observation" / "sol.sqlite", create_schema=False)
     events = ledger.verified_events()
@@ -395,7 +396,7 @@ def _record_attempt(state: Path, review: SavedReview, session: PlanSession) -> N
     if source is None or submission_is_late(source.timestamp, now):
         raise ValueError("review has passed its submission cutoff")
     _packet, _rules, _ph, _mh, book_id, _kernel = replay(events)
-    append_manager_event(
+    event = append_manager_event(
         ledger,
         book_id=book_id,
         event_type=PROSPECTIVE_REQUEST_ATTEMPT,
@@ -409,6 +410,56 @@ def _record_attempt(state: Path, review: SavedReview, session: PlanSession) -> N
                 session.subject.encode()
             ).hexdigest(),
             "client_id": session.client_id,
+        },
+        expected_previous_hash=events[-1].event_hash,
+    )
+    return event.event_hash
+
+
+def _record_completion(
+    state: Path,
+    review: SavedReview,
+    attempt_hash: str,
+    result: GeneratedProposal,
+    evidence: dict[str, Json],
+) -> None:
+    """Persist the validated response before attempting proposal submission."""
+    ledger = SQLiteLedger(state / "observation" / "sol.sqlite", create_schema=False)
+    events = ledger.verified_events()
+    key = f"prospective-request-completion:{review.proposal_id}"
+    if any(
+        event.deduplication_key == key
+        or (
+            event.event_type == PROSPECTIVE_REQUEST_COMPLETION
+            and (
+                thaw(event.payload).get("proposal_id") == review.proposal_id
+                or thaw(event.payload).get("review_hash") == review.review_hash
+            )
+        )
+        for event in events
+    ):
+        raise ValueError("request completion already recorded")
+    if (
+        events[-1].event_hash != attempt_hash
+        or events[-1].event_type != PROSPECTIVE_REQUEST_ATTEMPT
+    ):
+        raise ValueError("request attempt changed before completion")
+    now = datetime.now(UTC)
+    if now < events[-1].timestamp:
+        raise ValueError("completion clock precedes recorded ledger activity")
+    _packet, _rules, _ph, _mh, book_id, _kernel = replay(events)
+    append_manager_event(
+        ledger,
+        book_id=book_id,
+        event_type=PROSPECTIVE_REQUEST_COMPLETION,
+        dedup_key=key,
+        timestamp=now,
+        payload={
+            "proposal_id": review.proposal_id,
+            "review_hash": review.review_hash,
+            "attempt_hash": attempt_hash,
+            "proposal": json.loads(result.proposal.model_dump_json()),
+            "runtime_evidence": evidence,
         },
         expected_previous_hash=events[-1].event_hash,
     )
@@ -445,7 +496,7 @@ def live_request(state: Path, *, expected_subject: str) -> dict[str, Any]:
     with pilot_lock(state):
         verify_current_window(state)
         review = saved_review(state)
-        _record_attempt(state, review, session)
+        attempt_hash = _record_attempt(state, review, session)
         with OpenAI(
             api_key=session.token,
             base_url="https://api.openai.com/v1",
@@ -467,6 +518,7 @@ def live_request(state: Path, *, expected_subject: str) -> dict[str, Any]:
             "client_id": result.client_id,
             "review_hash": result.review_hash,
         }
+        _record_completion(state, review, attempt_hash, result, evidence)
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", delete=False
         ) as tmp:

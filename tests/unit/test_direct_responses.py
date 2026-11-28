@@ -19,12 +19,19 @@ from test_prospective_pilot_safety import collection
 from test_prospective_single_sol import configured
 
 from drift.ledger.sqlite import SQLiteLedger
-from drift.manager.book import PROSPECTIVE_REQUEST_ATTEMPT, append_manager_event
+from drift.manager.book import (
+    PROSPECTIVE_REQUEST_ATTEMPT,
+    PROSPECTIVE_REQUEST_COMPLETION,
+    append_manager_event,
+    thaw,
+)
+from drift.manager.service import PortfolioManager
 from drift.prospective.collect import Bar
 from drift.prospective.direct_responses import (
     PLAN_SCOPE,
     PlanSession,
     _record_attempt,
+    _record_completion,
     _request,
     _require_no_extra_billing,
     live_request,
@@ -429,6 +436,7 @@ def test_proposal_reuses_submission_and_seal(
             review.as_of + timedelta(minutes=5),
             review.as_of + timedelta(minutes=5, seconds=1),
             review.as_of + timedelta(minutes=5, seconds=2),
+            review.as_of + timedelta(minutes=5, seconds=3),
         )
     )
 
@@ -446,7 +454,7 @@ def test_proposal_reuses_submission_and_seal(
 
     monkeypatch.setattr("drift.prospective.direct_responses.datetime", RequestClock)
     with pilot_lock(state):
-        _record_attempt(state, review, session())
+        attempt_hash = _record_attempt(state, review, session())
     evidence = {
         "route": result.route,
         "requested_model": result.requested_model,
@@ -458,6 +466,17 @@ def test_proposal_reuses_submission_and_seal(
         "client_id": result.client_id,
         "review_hash": result.review_hash,
     }
+    with pilot_lock(state):
+        _record_completion(state, review, attempt_hash, result, evidence)
+    original_propose = PortfolioManager.propose
+
+    def interrupted(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("interrupted after intent")
+
+    monkeypatch.setattr(PortfolioManager, "propose", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted after intent"):
+        apply_proposal(state, "observation", "sol", path, runtime_evidence=evidence)
+    monkeypatch.setattr(PortfolioManager, "propose", original_propose)
     accepted = apply_proposal(
         state, "observation", "sol", path, runtime_evidence=evidence
     )
@@ -466,14 +485,99 @@ def test_proposal_reuses_submission_and_seal(
     events = ledger.verified_events()
     kinds = [event.event_type for event in events]
     assert kinds.index("manager.decision") < kinds.index("manager.prospective_seal")
-    from drift.manager.book import thaw
-
     intent = next(
         event for event in events if event.event_type == "manager.prospective_intent"
     )
     assert thaw(intent.payload)["runtime_evidence"] == evidence
+    duplicate = apply_proposal(
+        state, "observation", "sol", path, runtime_evidence=evidence
+    )
+    assert isinstance(duplicate, dict) and duplicate["status"] == "duplicate"
+    assert ledger.verified_events() == events
     with pytest.raises(ValueError, match="resolved|submitted"):
         saved_review(state)
+
+
+@pytest.mark.parametrize(
+    "defect", ["missing", "proposal", "evidence", "attempt", "duplicate"]
+)
+def test_submission_requires_matching_unique_completion(
+    review_state: tuple[Path, Any], monkeypatch: pytest.MonkeyPatch, defect: str
+) -> None:
+    state, review = review_state
+    result = invoke(client_for([completed(review)], []), review)
+    path = state / "generated-proposal.json"
+    path.write_text(result.proposal.model_dump_json(), encoding="utf-8")
+
+    class RequestClock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Any:
+            return review.as_of + timedelta(minutes=4)
+
+    monkeypatch.setattr("drift.prospective.direct_responses.datetime", RequestClock)
+    with pilot_lock(state):
+        attempt_hash = _record_attempt(state, review, session())
+    evidence = {
+        "route": result.route,
+        "requested_model": result.requested_model,
+        "observed_model": result.observed_model,
+        "requested_effort": result.requested_effort,
+        "observed_effort": result.observed_effort,
+        "response_id": result.response_id,
+        "account_subject_sha256": result.account_subject_sha256,
+        "client_id": result.client_id,
+        "review_hash": result.review_hash,
+    }
+    if defect != "missing":
+        with pilot_lock(state):
+            _record_completion(state, review, attempt_hash, result, evidence)
+    ledger = SQLiteLedger(state / "observation" / "sol.sqlite", create_schema=False)
+    if defect == "proposal":
+        changed = proposal(review)
+        changed["thesis"] = "Different proposal"
+        path.write_text(json.dumps(changed), encoding="utf-8")
+    elif defect == "evidence":
+        evidence["response_id"] = "different-response"
+    elif defect == "attempt":
+        # A second matching attempt makes the original completion ambiguous.
+        events = ledger.verified_events()
+        attempt = next(e for e in events if e.event_hash == attempt_hash)
+        append_manager_event(
+            ledger,
+            book_id=events[0].entity_id,
+            event_type=PROSPECTIVE_REQUEST_ATTEMPT,
+            dedup_key="other-attempt",
+            timestamp=attempt.timestamp,
+            payload=thaw(attempt.payload),
+            expected_previous_hash=events[-1].event_hash,
+        )
+    elif defect == "duplicate":
+        events = ledger.verified_events()
+        original = next(
+            e for e in events if e.event_type == PROSPECTIVE_REQUEST_COMPLETION
+        )
+        append_manager_event(
+            ledger,
+            book_id=events[0].entity_id,
+            event_type=PROSPECTIVE_REQUEST_COMPLETION,
+            dedup_key="other-completion",
+            timestamp=original.timestamp,
+            payload=thaw(original.payload),
+            expected_previous_hash=events[-1].event_hash,
+        )
+    before = ledger.verified_events()
+    with pytest.raises(ValueError, match="request (attempt|completion)"):
+        apply_proposal(state, "observation", "sol", path, runtime_evidence=evidence)
+    assert ledger.verified_events() == before
+    assert not any(
+        e.event_type
+        in {
+            "manager.prospective_intent",
+            "manager.decision",
+            "manager.prospective_seal",
+        }
+        for e in before
+    )
 
 
 @pytest.mark.parametrize(
@@ -697,6 +801,31 @@ def test_ambiguous_attempt_survives_failure_and_blocks_retry(
     path.write_text(json.dumps(proposal(review)), encoding="utf-8")
     with pytest.raises(ValueError, match="direct request attempted"):
         apply_proposal(state, "observation", "sol", path)
+    ledger = SQLiteLedger.open_existing(state / "observation" / "sol.sqlite")
+    before = ledger.verified_events()
+    fabricated = {
+        "route": "chatgpt-plan-responses",
+        "requested_model": "gpt-6.2-sol",
+        "observed_model": "gpt-6.2-sol",
+        "requested_effort": "xhigh",
+        "observed_effort": "xhigh",
+        "response_id": "fabricated-response",
+        "account_subject_sha256": hashlib.sha256(auth.subject.encode()).hexdigest(),
+        "client_id": auth.client_id,
+        "review_hash": review.review_hash,
+    }
+    with pytest.raises(ValueError, match="request completion"):
+        apply_proposal(state, "observation", "sol", path, runtime_evidence=fabricated)
+    assert ledger.verified_events() == before
+    assert not any(
+        event.event_type
+        in {
+            "manager.prospective_intent",
+            "manager.decision",
+            "manager.prospective_seal",
+        }
+        for event in before
+    )
 
     class AfterCutoff(datetime):
         @classmethod

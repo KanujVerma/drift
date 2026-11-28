@@ -26,6 +26,7 @@ from drift.manager.book import (
     PROSPECTIVE_EXPIRED,
     PROSPECTIVE_INTENT,
     PROSPECTIVE_REQUEST_ATTEMPT,
+    PROSPECTIVE_REQUEST_COMPLETION,
     PROSPECTIVE_REVIEW,
     PROSPECTIVE_SEAL,
     append_manager_event,
@@ -1500,6 +1501,39 @@ def apply_proposal(
             }
         ):
             raise ValueError("direct runtime evidence does not match request attempt")
+        completion_key = f"prospective-request-completion:{receipt_id}"
+        completions = [
+            event
+            for event in events
+            if event.deduplication_key == completion_key
+            or (
+                event.event_type == PROSPECTIVE_REQUEST_COMPLETION
+                and (
+                    thaw(event.payload).get("proposal_id") == receipt_id
+                    or thaw(event.payload).get("review_hash") == review.event_hash
+                    or thaw(event.payload).get("attempt_hash") == attempt.event_hash
+                )
+            )
+        ]
+        if len(completions) != 1:
+            raise ValueError("direct runtime evidence requires one request completion")
+        completion = completions[0]
+        if (
+            completion.event_type != PROSPECTIVE_REQUEST_COMPLETION
+            or completion.deduplication_key != completion_key
+            or events.index(completion) <= events.index(attempt)
+            or thaw(completion.payload)
+            != {
+                "proposal_id": receipt_id,
+                "review_hash": review.event_hash,
+                "attempt_hash": attempt.event_hash,
+                "proposal": json.loads(proposal.model_dump_json()),
+                "runtime_evidence": runtime_evidence,
+            }
+        ):
+            raise ValueError(
+                "direct runtime evidence does not match request completion"
+            )
     if observation_date(review.timestamp) is None:
         raise ValueError("review time is outside an observation session")
     saved = thaw(review.payload)
@@ -1588,7 +1622,7 @@ def apply_proposal(
             or events.index(intent) <= events.index(review)
             or (
                 runtime_evidence is not None
-                and events.index(intent) <= events.index(attempt)
+                and events.index(intent) <= events.index(completion)
             )
         ):
             raise ValueError("proposal conflicts with saved submission intent")
